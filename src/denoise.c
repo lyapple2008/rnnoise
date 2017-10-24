@@ -40,6 +40,8 @@
 #include "rnn.h"
 #include "rnn_data.h"
 
+#define M_PI       3.14159265358979323846   // pi
+
 #define FRAME_SIZE_SHIFT 2
 #define FRAME_SIZE (120<<FRAME_SIZE_SHIFT)
 #define WINDOW_SIZE (2*FRAME_SIZE)
