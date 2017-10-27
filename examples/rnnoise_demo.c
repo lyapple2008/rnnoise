@@ -43,6 +43,7 @@ int main(int argc, char **argv) {
 
   f1 = fopen(argv[1], "rb");
   fout = fopen(argv[2], "w");
+
   while (1) {
     short tmp[FRAME_SIZE];
     fread(tmp, sizeof(short), FRAME_SIZE, f1);
