@@ -150,7 +150,7 @@ static OPUS_INLINE opus_int16 SAT16(opus_int32 x) {
 #else /* FIXED_POINT */
 
 typedef float opus_val16;
-typedef double opus_val32;
+typedef float opus_val32;
 typedef float opus_val64;
 
 typedef float celt_sig;

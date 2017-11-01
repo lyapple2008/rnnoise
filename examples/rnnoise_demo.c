@@ -32,6 +32,7 @@
 int main(int argc, char **argv) {
   int i;
   int first = 1;
+  int frmCnt = 0;
   float x[FRAME_SIZE];
   FILE *f1, *fout;
   DenoiseState *st;
@@ -42,7 +43,7 @@ int main(int argc, char **argv) {
   }
 
   f1 = fopen(argv[1], "rb");
-  fout = fopen(argv[2], "w");
+  fout = fopen(argv[2], "wb");
 
   while (1) {
     short tmp[FRAME_SIZE];
@@ -53,6 +54,7 @@ int main(int argc, char **argv) {
     for (i=0;i<FRAME_SIZE;i++) tmp[i] = x[i];
     if (!first) fwrite(tmp, sizeof(short), FRAME_SIZE, fout);
     first = 0;
+	printf("Bytes = %d\n", (frmCnt++)*FRAME_SIZE);
   }
   rnnoise_destroy(st);
   fclose(f1);
