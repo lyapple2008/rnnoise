@@ -26,6 +26,7 @@
 
 #include <stdio.h>
 #include "rnnoise.h"
+#include "wav_io.h"
 
 #define FRAME_SIZE 480
 
@@ -45,16 +46,39 @@ int main(int argc, char **argv) {
   f1 = fopen(argv[1], "rb");
   fout = fopen(argv[2], "wb");
 
+  WAV_HEADER header;
+  if (read_header(&header, f1) != 0) {
+	  fprintf(stderr, "Fail to parse wav file!\n");
+	  return -1;
+  }
+  else {
+	  print_header(&header);
+  }
+
+  if (header.format.bits_per_sample != 16 ||
+	  header.format.sample_per_sec != 48000) {
+	  fprintf(stderr, "Only support 48k 16bits\n");
+	  return -1;
+  }
+
+  write_header(&header, fout);
+
+  short tmp[FRAME_SIZE];
   while (1) {
-    short tmp[FRAME_SIZE];
-    fread(tmp, sizeof(short), FRAME_SIZE, f1);
-    if (feof(f1)) break;
-    for (i=0;i<FRAME_SIZE;i++) x[i] = tmp[i];
+	int sample = read_samples(tmp, FRAME_SIZE, &header, f1);
+	if (sample <= 0) {
+		break;
+	}
+	for (i = 0; i < FRAME_SIZE; i++) {
+		x[i] = tmp[i];
+	}
     rnnoise_process_frame(st, x, x);
-    for (i=0;i<FRAME_SIZE;i++) tmp[i] = x[i];
+	for (i = 0; i < FRAME_SIZE; i++) {
+		tmp[i] = x[i];
+	}
     if (!first) fwrite(tmp, sizeof(short), FRAME_SIZE, fout);
     first = 0;
-	printf("Bytes = %d\n", (frmCnt++)*FRAME_SIZE);
+	printf("%d -- %d\n", frmCnt++, sample);
   }
   rnnoise_destroy(st);
   fclose(f1);

@@ -23,13 +23,13 @@
     <ProjectGuid>{AC4EC8B4-7EFB-4F9A-B2D4-667E1F2082D3}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>DemoRNNoise</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0.15063.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>8.1</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v141</PlatformToolset>
+    <PlatformToolset>v140</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
@@ -143,11 +143,15 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\examples\rnnoise_demo.c" />
+    <ClCompile Include="..\..\examples\wav_io.c" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\librnnoise\librnnoise.vcxproj">
       <Project>{422021fe-e3c7-4893-b5af-91c7f94d52b9}</Project>
     </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\examples\wav_io.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

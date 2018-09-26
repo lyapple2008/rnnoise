@@ -18,5 +18,13 @@
     <ClCompile Include="..\..\examples\rnnoise_demo.c">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\examples\wav_io.c">
+      <Filter>源文件</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\examples\wav_io.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
