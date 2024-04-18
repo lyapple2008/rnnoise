@@ -27,6 +27,8 @@
 #ifndef RNN_H_
 #define RNN_H_
 
+#include "rnnoise.h"
+
 #include "opus_types.h"
 
 #define WEIGHTS_SCALE (1.f/256)
@@ -58,10 +60,6 @@ typedef struct {
 
 typedef struct RNNState RNNState;
 
-void compute_dense(const DenseLayer *layer, float *output, const float *input);
-
-void compute_gru(const GRULayer *gru, float *state, const float *input);
-
 void compute_rnn(RNNState *rnn, float *gains, float *vad, const float *input);
 
-#endif /* _MLP_H_ */
+#endif /* RNN_H_ */

@@ -1,4 +1,5 @@
-/* Copyright (c) 2017 Mozilla */
+/* Copyright (c) 2018 Gregor Richards
+ * Copyright (c) 2017 Mozilla */
 /*
    Redistribution and use in source and binary forms, with or without
    modification, are permitted provided that the following conditions
@@ -52,13 +53,7 @@
 
 #define SQUARE(x) ((x)*(x))
 
-#define SMOOTH_BANDS 1
-
-#if SMOOTH_BANDS
 #define NB_BANDS 22
-#else
-#define NB_BANDS 21
-#endif
 
 #define CEPS_MEM 8
 #define NB_DELTA_CEPS 6
@@ -69,6 +64,11 @@
 #ifndef TRAINING
 #define TRAINING 0
 #endif
+
+
+/* The built-in model, used if no file is given as input */
+extern const struct RNNModel rnnoise_model_orig;
+
 
 static const opus_int16 eband5ms[] = {
 /*0  200 400 600 800  1k 1.2 1.4 1.6  2k 2.4 2.8 3.2  4k 4.8 5.6 6.8  8k 9.6 12k 15.6 20k*/
@@ -97,8 +97,7 @@ struct DenoiseState {
   RNNState rnn;
 };
 
-#if SMOOTH_BANDS
-void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
+static void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   int i;
   float sum[NB_BANDS] = {0};
   for (i=0;i<NB_BANDS-1;i++)
@@ -123,7 +122,7 @@ void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   }
 }
 
-void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_fft_cpx *P) {
+static void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_fft_cpx *P) {
   int i;
   float sum[NB_BANDS] = {0};
   for (i=0;i<NB_BANDS-1;i++)
@@ -148,7 +147,7 @@ void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_fft_cpx *
   }
 }
 
-void interp_band_gain(float *g, const float *bandE) {
+static void interp_band_gain(float *g, const float *bandE) {
   int i;
   memset(g, 0, FREQ_SIZE);
   for (i=0;i<NB_BANDS-1;i++)
@@ -162,32 +161,6 @@ void interp_band_gain(float *g, const float *bandE) {
     }
   }
 }
-#else
-void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
-  int i;
-  for (i=0;i<NB_BANDS;i++)
-  {
-    int j;
-    opus_val32 sum = 0;
-    for (j=0;j<(eband5ms[i+1]-eband5ms[i])<<FRAME_SIZE_SHIFT;j++) {
-      sum += SQUARE(X[(eband5ms[i]<<FRAME_SIZE_SHIFT) + j].r);
-      sum += SQUARE(X[(eband5ms[i]<<FRAME_SIZE_SHIFT) + j].i);
-    }
-    bandE[i] = sum;
-  }
-}
-
-void interp_band_gain(float *g, const float *bandE) {
-  int i;
-  memset(g, 0, FREQ_SIZE);
-  for (i=0;i<NB_BANDS;i++)
-  {
-    int j;
-    for (j=0;j<(eband5ms[i+1]-eband5ms[i])<<FRAME_SIZE_SHIFT;j++)
-      g[(eband5ms[i]<<FRAME_SIZE_SHIFT) + j] = bandE[i];
-  }
-}
-#endif
 
 
 CommonState common;
@@ -195,7 +168,7 @@ CommonState common;
 static void check_init() {
   int i;
   if (common.init) return;
-  common.kfft = opus_fft_alloc_twiddles(2*FRAME_SIZE, NULL, NULL, NULL, 0);
+  common.kfft = rnn_fft_alloc_twiddles(2*FRAME_SIZE, NULL, NULL, NULL, 0);
   for (i=0;i<FRAME_SIZE;i++)
     common.half_window[i] = sin(.5*M_PI*sin(.5*M_PI*(i+.5)/FRAME_SIZE) * sin(.5*M_PI*(i+.5)/FRAME_SIZE));
   for (i=0;i<NB_BANDS;i++) {
@@ -245,7 +218,7 @@ static void forward_transform(kiss_fft_cpx *out, const float *in) {
     x[i].r = in[i];
     x[i].i = 0;
   }
-  opus_fft(common.kfft, x, y, 0);
+  rnn_fft(common.kfft, x, y, 0);
   for (i=0;i<FREQ_SIZE;i++) {
     out[i] = y[i];
   }
@@ -263,7 +236,7 @@ static void inverse_transform(float *out, const kiss_fft_cpx *in) {
     x[i].r = x[WINDOW_SIZE - i].r;
     x[i].i = -x[WINDOW_SIZE - i].i;
   }
-  opus_fft(common.kfft, x, y, 0);
+  rnn_fft(common.kfft, x, y, 0);
   /* output in reverse order for IFFT. */
   out[0] = WINDOW_SIZE*y[0].r;
   for (i=1;i<WINDOW_SIZE;i++) {
@@ -284,19 +257,33 @@ int rnnoise_get_size() {
   return sizeof(DenoiseState);
 }
 
-int rnnoise_init(DenoiseState *st) {
+int rnnoise_get_frame_size() {
+  return FRAME_SIZE;
+}
+
+int rnnoise_init(DenoiseState *st, RNNModel *model) {
   memset(st, 0, sizeof(*st));
+  if (model)
+    st->rnn.model = model;
+  else
+    st->rnn.model = &rnnoise_model_orig;
+  st->rnn.vad_gru_state = calloc(sizeof(float), st->rnn.model->vad_gru_size);
+  st->rnn.noise_gru_state = calloc(sizeof(float), st->rnn.model->noise_gru_size);
+  st->rnn.denoise_gru_state = calloc(sizeof(float), st->rnn.model->denoise_gru_size);
   return 0;
 }
 
-DenoiseState *rnnoise_create() {
+DenoiseState *rnnoise_create(RNNModel *model) {
   DenoiseState *st;
   st = malloc(rnnoise_get_size());
-  rnnoise_init(st);
+  rnnoise_init(st, model);
   return st;
 }
 
 void rnnoise_destroy(DenoiseState *st) {
+  free(st->rnn.vad_gru_state);
+  free(st->rnn.noise_gru_state);
+  free(st->rnn.denoise_gru_state);
   free(st);
 }
 
@@ -338,12 +325,12 @@ static int compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cp
   RNN_MOVE(st->pitch_buf, &st->pitch_buf[FRAME_SIZE], PITCH_BUF_SIZE-FRAME_SIZE);
   RNN_COPY(&st->pitch_buf[PITCH_BUF_SIZE-FRAME_SIZE], in, FRAME_SIZE);
   pre[0] = &st->pitch_buf[0];
-  pitch_downsample(pre, pitch_buf, PITCH_BUF_SIZE, 1);
-  pitch_search(pitch_buf+(PITCH_MAX_PERIOD>>1), pitch_buf, PITCH_FRAME_SIZE,
+  rnn_pitch_downsample(pre, pitch_buf, PITCH_BUF_SIZE, 1);
+  rnn_pitch_search(pitch_buf+(PITCH_MAX_PERIOD>>1), pitch_buf, PITCH_FRAME_SIZE,
                PITCH_MAX_PERIOD-3*PITCH_MIN_PERIOD, &pitch_index);
   pitch_index = PITCH_MAX_PERIOD-pitch_index;
 
-  gain = remove_doubling(pitch_buf, PITCH_MAX_PERIOD, PITCH_MIN_PERIOD,
+  gain = rnn_remove_doubling(pitch_buf, PITCH_MAX_PERIOD, PITCH_MIN_PERIOD,
           PITCH_FRAME_SIZE, &pitch_index, st->last_period, st->last_gain);
   st->last_period = pitch_index;
   st->last_gain = gain;
@@ -432,7 +419,7 @@ static void biquad(float *y, float mem[2], const float *x, const float *b, const
   }
 }
 
-void pitch_filter(kiss_fft_cpx *X, const kiss_fft_cpx *P, const float *Ex, const float *Ep,
+static void pitch_filter(kiss_fft_cpx *X, const kiss_fft_cpx *P, const float *Ex, const float *Ep,
                   const float *Exp, const float *g) {
   int i;
   float r[NB_BANDS];
@@ -538,20 +525,21 @@ int main(int argc, char **argv) {
   int vad_cnt=0;
   int gain_change_count=0;
   float speech_gain = 1, noise_gain = 1;
-  FILE *f1, *f2, *fout;
+  FILE *f1, *f2;
+  int maxCount;
   DenoiseState *st;
   DenoiseState *noise_state;
   DenoiseState *noisy;
-  st = rnnoise_create();
-  noise_state = rnnoise_create();
-  noisy = rnnoise_create();
+  st = rnnoise_create(NULL);
+  noise_state = rnnoise_create(NULL);
+  noisy = rnnoise_create(NULL);
   if (argc!=4) {
-    fprintf(stderr, "usage: %s <speech> <noise> <output denoised>\n", argv[0]);
+    fprintf(stderr, "usage: %s <speech> <noise> <count>\n", argv[0]);
     return 1;
   }
   f1 = fopen(argv[1], "r");
   f2 = fopen(argv[2], "r");
-  fout = fopen(argv[3], "w");
+  maxCount = atoi(argv[3]);
   for(i=0;i<150;i++) {
     short tmp[FRAME_SIZE];
     fread(tmp, sizeof(short), FRAME_SIZE, f2);
@@ -563,12 +551,11 @@ int main(int argc, char **argv) {
     float Ln[NB_BANDS];
     float features[NB_FEATURES];
     float g[NB_BANDS];
-    float gf[FREQ_SIZE]={1};
     short tmp[FRAME_SIZE];
     float vad=0;
-    float vad_prob;
     float E=0;
-    if (count==50000000) break;
+    if (count==maxCount) break;
+    if ((count%1000)==0) fprintf(stderr, "%d\r", count);
     if (++gain_change_count > 2821) {
       speech_gain = pow(10., (-40+(rand()%60))/20.);
       noise_gain = pow(10., (-30+(rand()%50))/20.);
@@ -643,37 +630,16 @@ int main(int argc, char **argv) {
       if (vad==0 && noise_gain==0) g[i] = -1;
     }
     count++;
-#if 0
-    for (i=0;i<NB_FEATURES;i++) printf("%f ", features[i]);
-    for (i=0;i<NB_BANDS;i++) printf("%f ", g[i]);
-    for (i=0;i<NB_BANDS;i++) printf("%f ", Ln[i]);
-    printf("%f\n", vad);
-#endif
 #if 1
     fwrite(features, sizeof(float), NB_FEATURES, stdout);
     fwrite(g, sizeof(float), NB_BANDS, stdout);
     fwrite(Ln, sizeof(float), NB_BANDS, stdout);
     fwrite(&vad, sizeof(float), 1, stdout);
 #endif
-#if 0
-    compute_rnn(&noisy->rnn, g, &vad_prob, features);
-    interp_band_gain(gf, g);
-#if 1
-    for (i=0;i<FREQ_SIZE;i++) {
-      X[i].r *= gf[i];
-      X[i].i *= gf[i];
-    }
-#endif
-    frame_synthesis(noisy, xn, X);
-
-    for (i=0;i<FRAME_SIZE;i++) tmp[i] = xn[i];
-    fwrite(tmp, sizeof(short), FRAME_SIZE, fout);
-#endif
   }
   fprintf(stderr, "matrix size: %d x %d\n", count, NB_FEATURES + 2*NB_BANDS + 1);
   fclose(f1);
   fclose(f2);
-  fclose(fout);
   return 0;
 }
 
