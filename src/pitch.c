@@ -297,16 +297,10 @@ void pitch_search(const opus_val16 *x_lp, opus_val16 *y,
    celt_assert(max_pitch>0);
    lag = len+max_pitch;
 
-   //opus_val16 x_lp4[len>>2];
-   //opus_val16 y_lp4[lag>>2];
-   //opus_val32 xcorr[max_pitch>>1];
-   opus_val16* x_lp4 = (opus_val16*)malloc((len>>2) * sizeof(opus_val16));
-   opus_val16* y_lp4 = (opus_val16*)malloc((lag>>2) * sizeof(opus_val16));
-   opus_val16* xcorr = (opus_val16*)malloc((max_pitch>>1) * sizeof(opus_val16));
-   celt_assert(x_lp4);
-   celt_assert(y_lp4);
-   celt_assert(xcorr);
-   
+   opus_val16 x_lp4[len>>2];
+   opus_val16 y_lp4[lag>>2];
+   opus_val32 xcorr[max_pitch>>1];
+
    /* Downsample by 2 again */
    for (j=0;j<len>>2;j++)
       x_lp4[j] = x_lp[2*j];
@@ -388,10 +382,6 @@ void pitch_search(const opus_val16 *x_lp, opus_val16 *y,
       offset = 0;
    }
    *pitch = 2*best_pitch[0]-offset;
-
-   free(x_lp4);
-   free(y_lp4);
-   free(xcorr);
 }
 
 #ifdef FIXED_POINT
@@ -453,10 +443,7 @@ opus_val16 remove_doubling(opus_val16 *x, int maxperiod, int minperiod,
       *T0_=maxperiod-1;
 
    T = T0 = *T0_;
-   //opus_val32 yy_lookup[maxperiod+1];
-   opus_val32* yy_lookup = (opus_val32*)malloc((maxperiod+1) * sizeof(opus_val32));
-   celt_assert(yy_lookup);
-
+   opus_val32 yy_lookup[maxperiod+1];
    dual_inner_prod(x, x, x-T0, N, &xx, &xy);
    yy_lookup[0] = xx;
    yy=xx;
@@ -535,8 +522,5 @@ opus_val16 remove_doubling(opus_val16 *x, int maxperiod, int minperiod,
 
    if (*T0_<minperiod0)
       *T0_=minperiod0;
-
-   free(yy_lookup);
-
    return pg;
 }
