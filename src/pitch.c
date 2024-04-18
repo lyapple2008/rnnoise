@@ -302,7 +302,7 @@ void pitch_search(const opus_val16 *x_lp, opus_val16 *y,
    //opus_val32 xcorr[max_pitch>>1];
    opus_val16* x_lp4 = (opus_val16*)malloc((len>>2) * sizeof(opus_val16));
    opus_val16* y_lp4 = (opus_val16*)malloc((lag>>2) * sizeof(opus_val16));
-   opus_val32* xcorr = (opus_val32*)malloc((max_pitch>>1) * sizeof(opus_val32));
+   opus_val16* xcorr = (opus_val16*)malloc((max_pitch>>1) * sizeof(opus_val16));
    celt_assert(x_lp4);
    celt_assert(y_lp4);
    celt_assert(xcorr);
