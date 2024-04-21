@@ -40,7 +40,7 @@
 #include "denoise.h"
 #include "arch.h"
 #include "kiss_fft.h"
-#include "src/_kiss_fft_guts.h"
+#include "_kiss_fft_guts.h"
 
 int lowpass = FREQ_SIZE;
 int band_lp = NB_BANDS;

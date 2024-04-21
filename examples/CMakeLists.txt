@@ -8,12 +8,16 @@ include_directories(
 
 # rnnoise library
 add_library(rnnoise
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/denoise.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/kiss_fft.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/pitch.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/celt_lpc.c 
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/rnn.c 
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/rnn_data.c
+${CMAKE_CURRENT_SOURCE_DIR}/../src/denoise.c
+${CMAKE_CURRENT_SOURCE_DIR}/../src/kiss_fft.c
+${CMAKE_CURRENT_SOURCE_DIR}/../src/nnet_default.c
+${CMAKE_CURRENT_SOURCE_DIR}/../src/nnet.c
+${CMAKE_CURRENT_SOURCE_DIR}/../src/parse_lpcnet_weights.c
+${CMAKE_CURRENT_SOURCE_DIR}/../src/pitch.c
+${CMAKE_CURRENT_SOURCE_DIR}/../src/celt_lpc.c 
+${CMAKE_CURRENT_SOURCE_DIR}/../src/rnn.c 
+${CMAKE_CURRENT_SOURCE_DIR}/../src/rnnoise_data.c
+${CMAKE_CURRENT_SOURCE_DIR}/../src/rnnoise_tables.c
 )
 
 # demo
