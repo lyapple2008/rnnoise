@@ -77,7 +77,6 @@ int main(int argc, char **argv) {
 	}
     if (!first) fwrite(tmp, sizeof(short), FRAME_SIZE, fout);
     first = 0;
-	printf("%d -- %d\n", frmCnt++, sample);
   }
   rnnoise_destroy(st);
   fclose(f1);
