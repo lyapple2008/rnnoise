@@ -1,5 +1,4 @@
-/* Copyright (c) 2008-2011 Octasic Inc.
-                 2012-2017 Jean-Marc Valin */
+/* Copyright (c) 2023 Amazon */
 /*
    Redistribution and use in source and binary forms, with or without
    modification, are permitted provided that the following conditions
@@ -29,29 +28,50 @@
 #include "config.h"
 #endif
 
-#include <math.h>
-#include "opus_types.h"
-#include "common.h"
-#include "arch.h"
-#include "rnn.h"
-#include "rnnoise_data.h"
 #include <stdio.h>
+#include <string.h>
+#include <stddef.h>
+#include "nnet.h"
+#include "arch.h"
+#include "nnet.h"
 
+/* This is a bit of a hack because we need to build nnet_data.c and plc_data.c without USE_WEIGHTS_FILE,
+   but USE_WEIGHTS_FILE is defined in config.h. */
+#undef HAVE_CONFIG_H
+#ifdef USE_WEIGHTS_FILE
+#undef USE_WEIGHTS_FILE
+#endif
+#include "rnnoise_data.c"
 
-#define INPUT_SIZE 42
+void write_weights(const WeightArray *list, FILE *fout)
+{
+  int i=0;
+  unsigned char zeros[WEIGHT_BLOCK_SIZE] = {0};
+  while (list[i].name != NULL) {
+    WeightHead h;
+    if (strlen(list[i].name) >= sizeof(h.name) - 1) {
+      printf("[write_weights] warning: name %s too long\n", list[i].name);
+    }
+    memcpy(h.head, "DNNw", 4);
+    h.version = WEIGHT_BLOB_VERSION;
+    h.type = list[i].type;
+    h.size = list[i].size;
+    h.block_size = (h.size+WEIGHT_BLOCK_SIZE-1)/WEIGHT_BLOCK_SIZE*WEIGHT_BLOCK_SIZE;
+    RNN_CLEAR(h.name, sizeof(h.name));
+    strncpy(h.name, list[i].name, sizeof(h.name));
+    h.name[sizeof(h.name)-1] = 0;
+    celt_assert(sizeof(h) == WEIGHT_BLOCK_SIZE);
+    fwrite(&h, 1, WEIGHT_BLOCK_SIZE, fout);
+    fwrite(list[i].data, 1, h.size, fout);
+    fwrite(zeros, 1, h.block_size-h.size, fout);
+    i++;
+  }
+}
 
-
-void compute_rnn(const RNNoise *model, RNNState *rnn, float *gains, float *vad, const float *input, int arch) {
-  float tmp[MAX_NEURONS];
-  float tmp2[MAX_NEURONS];
-  /*for (int i=0;i<INPUT_SIZE;i++) printf("%f ", input[i]);printf("\n");*/
-  compute_generic_conv1d(&model->conv1, tmp, rnn->conv1_state, input, CONV1_IN_SIZE, ACTIVATION_TANH, arch);
-  compute_generic_conv1d(&model->conv2, tmp2, rnn->conv2_state, tmp, CONV2_IN_SIZE, ACTIVATION_TANH, arch);
-  compute_generic_gru(&model->gru1_input, &model->gru1_recurrent, rnn->gru1_state, tmp2, arch);
-  compute_generic_gru(&model->gru2_input, &model->gru2_recurrent, rnn->gru2_state, rnn->gru1_state, arch);
-  compute_generic_gru(&model->gru3_input, &model->gru3_recurrent, rnn->gru3_state, rnn->gru2_state, arch);
-  compute_generic_dense(&model->dense_out, gains, rnn->gru3_state, ACTIVATION_SIGMOID, arch);
-  compute_generic_dense(&model->vad_dense, vad, rnn->gru3_state, ACTIVATION_SIGMOID, arch);
-  /*for (int i=0;i<22;i++) printf("%f ", gains[i]);printf("\n");*/
-  /*printf("%f\n", *vad);*/
+int main(void)
+{
+  FILE *fout = fopen("weights_blob.bin", "w");
+  write_weights(rnnoise_arrays, fout);
+  fclose(fout);
+  return 0;
 }

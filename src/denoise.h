@@ -1,4 +1,4 @@
-/* Copyright (c) 2017 Jean-Marc Valin */
+/* Copyright (c) 2017 Mozilla */
 /*
    Redistribution and use in source and binary forms, with or without
    modification, are permitted provided that the following conditions
@@ -24,26 +24,33 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef RNN_H_
-#define RNN_H_
-
 #include "rnnoise.h"
-#include "rnnoise_data.h"
+#include "kiss_fft.h"
+#include "nnet.h"
 
-#include "opus_types.h"
+#define FRAME_SIZE 480
+#define WINDOW_SIZE (2*FRAME_SIZE)
+#define FREQ_SIZE (FRAME_SIZE + 1)
+#define NB_BANDS 32
+#define NB_FEATURES (2*NB_BANDS+1)
 
-#define WEIGHTS_SCALE (1.f/256)
 
-#define MAX_NEURONS 1024
+#define PITCH_MIN_PERIOD 60
+#define PITCH_MAX_PERIOD 768
+#define PITCH_FRAME_SIZE 960
+#define PITCH_BUF_SIZE (PITCH_MAX_PERIOD+PITCH_FRAME_SIZE)
+
+extern const WeightArray rnnoise_arrays[];
+
+extern const int eband20ms[];
 
 
-typedef struct {
-  float conv1_state[CONV1_STATE_SIZE];
-  float conv2_state[CONV2_STATE_SIZE];
-  float gru1_state[GRU1_STATE_SIZE];
-  float gru2_state[GRU2_STATE_SIZE];
-  float gru3_state[GRU3_STATE_SIZE];
-} RNNState;
-void compute_rnn(const RNNoise *model, RNNState *rnn, float *gains, float *vad, const float *input, int arch);
+void rnn_biquad(float *y, float mem[2], const float *x, const float *b, const float *a, int N);
 
-#endif /* RNN_H_ */
+void rnn_pitch_filter(kiss_fft_cpx *X, const kiss_fft_cpx *P, const float *Ex, const float *Ep,
+                  const float *Exp, const float *g);
+
+void rnn_frame_analysis(DenoiseState *st, kiss_fft_cpx *X, float *Ex, const float *in);
+
+int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cpx *P,
+                                  float *Ex, float *Ep, float *Exp, float *features, const float *in);
