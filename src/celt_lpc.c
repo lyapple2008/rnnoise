@@ -29,6 +29,7 @@
 #include "config.h"
 #endif
 
+#include <stdlib.h>
 #include "celt_lpc.h"
 #include "arch.h"
 #include "common.h"
@@ -101,7 +102,12 @@ int rnn_autocorr(
    int fastN=n-lag;
    int shift;
    const opus_val16 *xptr;
+#ifdef _WIN32
+   /* Windows/MSVC doesn't support VLA, use dynamic allocation */
+   opus_val16 *xx = (opus_val16*)malloc(n * sizeof(opus_val16));
+#else
    opus_val16 xx[n];
+#endif
    celt_assert(n>0);
    celt_assert(overlap>=0);
    if (overlap == 0)
@@ -166,6 +172,11 @@ int rnn_autocorr(
          ac[i] = SHR32(ac[i], shift2);
       shift += shift2;
    }
+#endif
+
+#ifdef _WIN32
+   /* Free dynamically allocated memory on Windows */
+   free(xx);
 #endif
 
    return shift;

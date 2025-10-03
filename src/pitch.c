@@ -35,6 +35,7 @@
 #include "config.h"
 #endif
 
+#include <stdlib.h>
 #include "pitch.h"
 #include "common.h"
 #include "celt_lpc.h"
@@ -294,9 +295,16 @@ void rnn_pitch_search(const opus_val16 *x_lp, opus_val16 *y,
    celt_assert(max_pitch>0);
    lag = len+max_pitch;
 
+#ifdef _WIN32
+   /* Windows/MSVC doesn't support VLA, use dynamic allocation */
+   opus_val16 *x_lp4 = (opus_val16*)malloc((len>>2) * sizeof(opus_val16));
+   opus_val16 *y_lp4 = (opus_val16*)malloc((lag>>2) * sizeof(opus_val16));
+   opus_val32 *xcorr = (opus_val32*)malloc((max_pitch>>1) * sizeof(opus_val32));
+#else
    opus_val16 x_lp4[len>>2];
    opus_val16 y_lp4[lag>>2];
    opus_val32 xcorr[max_pitch>>1];
+#endif
 
    /* Downsample by 2 again */
    for (j=0;j<len>>2;j++)
@@ -379,6 +387,13 @@ void rnn_pitch_search(const opus_val16 *x_lp, opus_val16 *y,
       offset = 0;
    }
    *pitch = 2*best_pitch[0]-offset;
+
+#ifdef _WIN32
+   /* Free dynamically allocated memory on Windows */
+   free(x_lp4);
+   free(y_lp4);
+   free(xcorr);
+#endif
 }
 
 #ifdef FIXED_POINT
@@ -440,7 +455,12 @@ opus_val16 rnn_remove_doubling(opus_val16 *x, int maxperiod, int minperiod,
       *T0_=maxperiod-1;
 
    T = T0 = *T0_;
+#ifdef _WIN32
+   /* Windows/MSVC doesn't support VLA, use dynamic allocation */
+   opus_val32 *yy_lookup = (opus_val32*)malloc((maxperiod+1) * sizeof(opus_val32));
+#else
    opus_val32 yy_lookup[maxperiod+1];
+#endif
    dual_inner_prod(x, x, x-T0, N, &xx, &xy);
    yy_lookup[0] = xx;
    yy=xx;
@@ -519,5 +539,11 @@ opus_val16 rnn_remove_doubling(opus_val16 *x, int maxperiod, int minperiod,
 
    if (*T0_<minperiod0)
       *T0_=minperiod0;
+
+#ifdef _WIN32
+   /* Free dynamically allocated memory on Windows */
+   free(yy_lookup);
+#endif
+
    return pg;
 }

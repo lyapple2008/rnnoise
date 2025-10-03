@@ -217,7 +217,12 @@ int main(int argc, char **argv) {
     
     if (is_input_wav && input_header.num_channels > 1) {
       // Read multi-channel data but only process first channel
+#ifdef _WIN32
+      /* Windows/MSVC doesn't support VLA, use dynamic allocation */
+      short *multi_channel_tmp = (short*)malloc(FRAME_SIZE * input_header.num_channels * sizeof(short));
+#else
       short multi_channel_tmp[FRAME_SIZE * input_header.num_channels];
+#endif
       samples_read = fread(multi_channel_tmp, sizeof(short), FRAME_SIZE * input_header.num_channels, f1);
       samples_read /= input_header.num_channels;
       
@@ -225,6 +230,11 @@ int main(int argc, char **argv) {
       for (i = 0; i < samples_read; i++) {
         tmp[i] = multi_channel_tmp[i * input_header.num_channels];
       }
+      
+#ifdef _WIN32
+      /* Free dynamically allocated memory on Windows */
+      free(multi_channel_tmp);
+#endif
     } else {
       // Read mono data
       samples_read = fread(tmp, sizeof(short), FRAME_SIZE, f1);
