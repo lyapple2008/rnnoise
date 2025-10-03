@@ -604,7 +604,7 @@ int main(int argc, char **argv) {
     } else {
       for (i=0;i<FRAME_SIZE;i++) n[i] = 0;
     }
-    printf("speech_gain %f, noise_gain %f\n", speech_gain, noise_gain);
+    // printf("speech_gain %f, noise_gain %f\n", speech_gain, noise_gain);
     // 低通滤波，过滤50Hz以下信号
     biquad(x, mem_hp_x, x, b_hp, a_hp, FRAME_SIZE);
     biquad(x, mem_resp_x, x, b_sig, a_sig, FRAME_SIZE);

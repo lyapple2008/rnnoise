@@ -119,46 +119,115 @@ class RNNoiseModel(nn.Module):
 class RNNoiseDataset(Dataset):
     """Dataset class for RNNoise training data"""
     
-    def __init__(self, data_file: str, window_size: int = 2000):
+    def __init__(self, data_file: str, window_size: int = 2000, data_format: str = 'hdf5'):
         """
         Initialize dataset
         
         Args:
-            data_file: Path to HDF5 file containing training data
+            data_file: Path to data file (HDF5 or binary format)
             window_size: Length of sequences to generate
+            data_format: 'hdf5' for HDF5 format, 'binary' for denoise.c output format
         """
         self.window_size = window_size
+        self.data_format = data_format
         
-        print(f'Loading data from {data_file}...')
+        if data_format == 'hdf5':
+            self._load_hdf5_data(data_file)
+        elif data_format == 'binary':
+            self._load_binary_data(data_file)
+        else:
+            raise ValueError(f"Unsupported data format: {data_format}")
+    
+    def _load_hdf5_data(self, data_file: str):
+        """Load data from HDF5 format (original implementation)"""
+        print(f'Loading HDF5 data from {data_file}...')
         with h5py.File(data_file, 'r') as hf:
             all_data = hf['data'][:]
-        print('Data loading complete.')
+        print('HDF5 data loading complete.')
         
         # Calculate number of sequences
-        self.nb_sequences = len(all_data) // window_size
-        print(f'{self.nb_sequences} sequences of length {window_size}')
+        self.nb_sequences = len(all_data) // self.window_size
+        print(f'{self.nb_sequences} sequences of length {self.window_size}')
         
         # Reshape data into sequences
-        data_truncated = all_data[:self.nb_sequences * window_size]
+        data_truncated = all_data[:self.nb_sequences * self.window_size]
         
         # Input features (first 42 columns)
-        self.x_data = data_truncated[:, :42].reshape(self.nb_sequences, window_size, 42)
+        self.x_data = data_truncated[:, :42].reshape(self.nb_sequences, self.window_size, 42)
         
         # Denoise targets (columns 42:64)
-        self.y_denoise = data_truncated[:, 42:64].reshape(self.nb_sequences, window_size, 22)
+        self.y_denoise = data_truncated[:, 42:64].reshape(self.nb_sequences, self.window_size, 22)
         
         # Noise targets (columns 64:86) - not used in current loss but kept for compatibility
-        self.noise_data = data_truncated[:, 64:86].reshape(self.nb_sequences, window_size, 22)
+        self.noise_data = data_truncated[:, 64:86].reshape(self.nb_sequences, self.window_size, 22)
         
         # VAD targets (column 86)
-        self.y_vad = data_truncated[:, 86:87].reshape(self.nb_sequences, window_size, 1)
+        self.y_vad = data_truncated[:, 86:87].reshape(self.nb_sequences, self.window_size, 1)
         
         # Convert to float32
         self.x_data = self.x_data.astype(np.float32)
         self.y_denoise = self.y_denoise.astype(np.float32)
         self.y_vad = self.y_vad.astype(np.float32)
         
-        print(f'Data shapes: x={self.x_data.shape}, y_denoise={self.y_denoise.shape}, y_vad={self.y_vad.shape}')
+        print(f'HDF5 data shapes: x={self.x_data.shape}, y_denoise={self.y_denoise.shape}, y_vad={self.y_vad.shape}')
+    
+    def _load_binary_data(self, data_file: str):
+        """Load data from binary format (denoise.c output)"""
+        print(f'Loading binary data from {data_file}...')
+        
+        # Each frame contains: 42 (features) + 22 (denoise_targets) + 22 (noise_targets) + 1 (vad) = 87 floats
+        frame_size = 87
+        
+        # Read binary data
+        with open(data_file, 'rb') as f:
+            data_bytes = f.read()
+        
+        # Convert to numpy array of floats
+        total_floats = len(data_bytes) // 4  # 4 bytes per float
+        if total_floats % frame_size != 0:
+            print(f"Warning: Data size ({total_floats} floats) is not divisible by frame size ({frame_size}).")
+            # Truncate to nearest complete frame
+            total_floats = (total_floats // frame_size) * frame_size
+        
+        # Load as float32 array
+        all_data = np.frombuffer(data_bytes[:total_floats*4], dtype=np.float32)
+        total_frames = total_floats // frame_size
+        
+        print(f'Loaded {total_frames} frames from binary file')
+        
+        # Reshape into frames
+        all_data = all_data.reshape(total_frames, frame_size)
+        
+        # Calculate number of sequences
+        self.nb_sequences = total_frames // self.window_size
+        print(f'{self.nb_sequences} sequences of length {self.window_size}')
+        
+        # Truncate to complete sequences
+        data_truncated = all_data[:self.nb_sequences * self.window_size]
+        
+        # Extract different components
+        # Features: columns 0:42
+        self.x_data = data_truncated[:, :42].reshape(self.nb_sequences, self.window_size, 42)
+        
+        # Denoise targets: columns 42:64 (frequency band gains)
+        self.y_denoise = data_truncated[:, 42:64].reshape(self.nb_sequences, self.window_size, 22)
+        
+        # Noise targets: columns 64:86 (log bark band energy) - not used in current loss
+        self.noise_data = data_truncated[:, 64:86].reshape(self.nb_sequences, self.window_size, 22)
+        
+        # VAD targets: column 86
+        self.y_vad = data_truncated[:, 86:87].reshape(self.nb_sequences, self.window_size, 1)
+        
+        # Convert to float32 (already float32 from binary, but ensure consistency)
+        self.x_data = self.x_data.astype(np.float32)
+        self.y_denoise = self.y_denoise.astype(np.float32)
+        self.y_vad = self.y_vad.astype(np.float32)
+        
+        print(f'Binary data shapes: x={self.x_data.shape}, y_denoise={self.y_denoise.shape}, y_vad={self.y_vad.shape}')        
+        print(f'Sample ranges:')
+        print(f'  Features: [{np.min(self.x_data):.3f}, {np.max(self.x_data):.3f}]')
+        print(f'  Denoise targets: [{np.min(self.y_denoise):.3f}, {np.max(self.y_denoise):.3f}]')
+        print(f'  VAD targets: [{np.min(self.y_vad):.3f}, {np.max(self.y_vad):.3f}]')
     
     def __len__(self):
         return self.nb_sequences
@@ -304,7 +373,9 @@ def validate_epoch(model: nn.Module,
 def main():
     parser = argparse.ArgumentParser(description='PyTorch RNNoise Training')
     parser.add_argument('--data-file', type=str, default='training.h5',
-                        help='Path to HDF5 training data file')
+                        help='Path to training data file (HDF5 or binary format)')
+    parser.add_argument('--data-format', type=str, choices=['hdf5', 'binary'], default='hdf5',
+                        help='Data format: hdf5 (original) or binary (denoise.c output)')
     parser.add_argument('--batch-size', type=int, default=32,
                         help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=120,
@@ -327,8 +398,15 @@ def main():
                         help='Loss weight for denoise output')
     parser.add_argument('--vad-weight', type=float, default=0.5,
                         help='Loss weight for VAD output')
+    parser.add_argument('--help-binary', action='store_true',
+                        help='Show help for creating binary training data')
     
     args = parser.parse_args()
+    
+    # Show binary data creation help if requested
+    if args.help_binary:
+        create_binary_training_data()
+        return
     
     # Set device
     if args.device == 'auto':
@@ -344,7 +422,7 @@ def main():
     print(f'Using device: {device}')
     
     # Load dataset
-    full_dataset = RNNoiseDataset(args.data_file, args.window_size)
+    full_dataset = RNNoiseDataset(args.data_file, args.window_size, args.data_format)
     
     # Split into train and validation
     dataset_size = len(full_dataset)
@@ -407,6 +485,24 @@ def main():
     
     print(f'\nTraining completed. Best validation loss: {best_val_loss:.6f}')
     print(f'Model saved as: {args.output_model}')
+
+
+def create_binary_training_data():
+    """
+    Example function showing how to create binary training data using denoise.c
+    This is for reference only - you need to compile and run denoise.c with TRAINING=1
+    """
+    print("To create binary training data:")
+    print("1. Compile denoise.c with TRAINING=1:")
+    print("   cd src && gcc -DTRAINING=1 -O3 denoise.c ... -o denoise_training")
+    print("")
+    print("2. Run with clean speech and noise files:")
+    print("   ./denoise_training speech.raw noise.raw 100000 > training_data.bin")
+    print("")
+    print("3. Train with PyTorch using binary format:")
+    print("   python rnn_train_pytorch.py --data-format binary --data-file training_data.bin")
+    print("")
+    print("Note: speech.raw and noise.raw should be 16-bit PCM files")
 
 
 if __name__ == '__main__':
