@@ -321,7 +321,9 @@ static int compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cp
   float *(pre[1]);
   float tmp[NB_BANDS];
   float follow, logMax;
+  // X带噪语音信号频域表示，Ex bark频带能量
   frame_analysis(st, X, Ex, in);
+  // TODO: pitch计算
   RNN_MOVE(st->pitch_buf, &st->pitch_buf[FRAME_SIZE], PITCH_BUF_SIZE-FRAME_SIZE);
   RNN_COPY(&st->pitch_buf[PITCH_BUF_SIZE-FRAME_SIZE], in, FRAME_SIZE);
   pre[0] = &st->pitch_buf[0];
@@ -342,10 +344,11 @@ static int compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cp
   compute_band_corr(Exp, X, P);
   for (i=0;i<NB_BANDS;i++) Exp[i] = Exp[i]/sqrt(.001+Ex[i]*Ep[i]);
   dct(tmp, Exp);
+  // 保存基于频率的音高相关特征，取前6个系数
   for (i=0;i<NB_DELTA_CEPS;i++) features[NB_BANDS+2*NB_DELTA_CEPS+i] = tmp[i];
   features[NB_BANDS+2*NB_DELTA_CEPS] -= 1.3;
   features[NB_BANDS+2*NB_DELTA_CEPS+1] -= 0.9;
-  features[NB_BANDS+3*NB_DELTA_CEPS] = .01*(pitch_index-300);
+  features[NB_BANDS+3*NB_DELTA_CEPS] = .01*(pitch_index-300); // 基于周期
   logMax = -2;
   follow = -2;
   for (i=0;i<NB_BANDS;i++) {
@@ -360,7 +363,9 @@ static int compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cp
     RNN_CLEAR(features, NB_FEATURES);
     return 1;
   }
+  // 此时features[NB_BANDS]保存了BFCC 22维特征
   dct(features, Ly);
+  // TODO: 这里进行调整是基于什么？经验？
   features[0] -= 12;
   features[1] -= 4;
   ceps_0 = st->cepstral_mem[st->memid];
@@ -493,6 +498,7 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   return vad_prob;
 }
 
+
 #if TRAINING
 
 static float uni_rand() {
@@ -556,6 +562,7 @@ int main(int argc, char **argv) {
     float E=0;
     if (count==maxCount) break;
     if ((count%1000)==0) fprintf(stderr, "%d\r", count);
+    // 随机计算带噪语音混音增益
     if (++gain_change_count > 2821) {
       speech_gain = pow(10., (-40+(rand()%60))/20.);
       noise_gain = pow(10., (-30+(rand()%50))/20.);
@@ -573,6 +580,8 @@ int main(int argc, char **argv) {
         }
       }
     }
+    // x: 纯净语音信号
+    // n: 噪声信号
     if (speech_gain != 0) {
       fread(tmp, sizeof(short), FRAME_SIZE, f1);
       if (feof(f1)) {
@@ -595,11 +604,15 @@ int main(int argc, char **argv) {
     } else {
       for (i=0;i<FRAME_SIZE;i++) n[i] = 0;
     }
+    printf("speech_gain %f, noise_gain %f\n", speech_gain, noise_gain);
+    // 低通滤波，过滤50Hz以下信号
     biquad(x, mem_hp_x, x, b_hp, a_hp, FRAME_SIZE);
     biquad(x, mem_resp_x, x, b_sig, a_sig, FRAME_SIZE);
     biquad(n, mem_hp_n, n, b_hp, a_hp, FRAME_SIZE);
     biquad(n, mem_resp_n, n, b_noise, a_noise, FRAME_SIZE);
+    // xn: 带噪语音信号
     for (i=0;i<FRAME_SIZE;i++) xn[i] = x[i] + n[i];
+    // E: 纯净语音信号帧能量，通过帧能量进行VAD判断
     if (E > 1e9f) {
       vad_cnt=0;
     } else if (E > 1e8f) {
@@ -616,9 +629,12 @@ int main(int argc, char **argv) {
     else if (vad_cnt > 0) vad = 0.5f;
     else vad = 1.f;
 
+    // x纯净语音信号分析，Y纯净语音信号频域表示，Ey bark频带能量
     frame_analysis(st, Y, Ey, x);
+    // n噪声信号分析，N噪声信号频域表示，En bark频带能量，Ln 对数bark频带能量
     frame_analysis(noise_state, N, En, n);
     for (i=0;i<NB_BANDS;i++) Ln[i] = log10(1e-2+En[i]);
+    // xn带噪语音信号分析，
     int silence = compute_frame_features(noisy, X, P, Ex, Ep, Exp, features, xn);
     pitch_filter(X, P, Ex, Ep, Exp, g);
     //printf("%f %d\n", noisy->last_gain, noisy->last_period);
@@ -631,10 +647,10 @@ int main(int argc, char **argv) {
     }
     count++;
 #if 1
-    fwrite(features, sizeof(float), NB_FEATURES, stdout);
-    fwrite(g, sizeof(float), NB_BANDS, stdout);
-    fwrite(Ln, sizeof(float), NB_BANDS, stdout);
-    fwrite(&vad, sizeof(float), 1, stdout);
+    fwrite(features, sizeof(float), NB_FEATURES, stdout); // 模型输入特征42维
+    fwrite(g, sizeof(float), NB_BANDS, stdout); // 频带增益ground truth
+    fwrite(Ln, sizeof(float), NB_BANDS, stdout); // 对数bark频带能量
+    fwrite(&vad, sizeof(float), 1, stdout); // vad 标签
 #endif
   }
   fprintf(stderr, "matrix size: %d x %d\n", count, NB_FEATURES + 2*NB_BANDS + 1);

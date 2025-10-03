@@ -102,7 +102,7 @@ noise_train = np.reshape(noise_train, (nb_sequences, window_size, 22))
 vad_train = np.copy(all_data[:nb_sequences*window_size, 86:87])
 vad_train = np.reshape(vad_train, (nb_sequences, window_size, 1))
 
-all_data = 0;
+all_data = 0
 #x_train = x_train.astype('float32')
 #y_train = y_train.astype('float32')
 
