@@ -13,7 +13,8 @@ add_executable(denoise_training
     ${CMAKE_CURRENT_SOURCE_DIR}/pitch.c
     ${CMAKE_CURRENT_SOURCE_DIR}/celt_lpc.c 
     ${CMAKE_CURRENT_SOURCE_DIR}/rnn.c 
-    ${CMAKE_CURRENT_SOURCE_DIR}/rnn_data.c
+    # ${CMAKE_CURRENT_SOURCE_DIR}/rnn_data.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/rnnoise_weights.c
 )
 
 

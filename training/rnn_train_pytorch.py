@@ -22,10 +22,10 @@ class WeightConstraint:
         self.clip_value = clip_value
     
     def __call__(self, module):
-        if hasattr(module, 'weight'):
+        if hasattr(module, 'weight') and module.weight is not None:
             with torch.no_grad():
                 module.weight.clamp_(-self.clip_value, self.clip_value)
-        if hasattr(module, 'bias') and module.bias is not None:
+        if hasattr(module, 'bias') and module.bias is not None and not isinstance(module.bias, bool):
             with torch.no_grad():
                 module.bias.clamp_(-self.clip_value, self.clip_value)
 
@@ -263,7 +263,12 @@ def custom_denoise_loss(y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Ten
     diff = sqrt_pred - sqrt_true
     term1 = 10 * torch.square(torch.square(diff))  # 10 * (sqrt_diff)^4
     term2 = torch.square(diff)  # (sqrt_diff)^2
-    term3 = 0.01 * F.binary_cross_entropy(y_pred, y_true, reduction='none')  # 0.01 * BCE
+    
+    # For BCE, we need to handle negative values in y_true
+    # Convert y_true to [0, 1] range for BCE: (y_true + 1) / 2
+    y_true_bce = (y_true + 1.0) / 2.0
+    y_pred_bce = (y_pred + 1.0) / 2.0
+    term3 = 0.01 * F.binary_cross_entropy(y_pred_bce, y_true_bce, reduction='none')  # 0.01 * BCE
     
     return torch.mean(mask * (term1 + term2 + term3))
 
@@ -272,6 +277,9 @@ def custom_vad_crossentropy(y_true: torch.Tensor, y_pred: torch.Tensor) -> torch
     """Custom VAD crossentropy equivalent to Keras my_crossentropy"""
     weight = 2 * torch.abs(y_true - 0.5)
     bce = F.binary_cross_entropy(y_pred, y_true, reduction='none')
+    # Ensure weight and bce have compatible shapes
+    if weight.dim() > bce.dim():
+        weight = weight.squeeze(-1)  # Remove last dimension if it's 1
     return torch.mean(weight * bce)
 
 
@@ -364,6 +372,9 @@ def validate_epoch(model: nn.Module,
             total_denoise_loss += denoise_loss.item()
             total_vad_loss += vad_loss.item()
             num_batches += 1
+    
+    if num_batches == 0:
+        return (0.0, 0.0, 0.0)
     
     return (total_loss / num_batches, 
             total_denoise_loss / num_batches, 
