@@ -29,13 +29,39 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include "rnnoise.h"
+#include <samplerate.h>
 
 #ifdef _WIN32
 #define strcasecmp _stricmp
 #endif
 
 #define FRAME_SIZE 480
+#define TARGET_SAMPLE_RATE 48000
+#define FRAME_TIME_MS 10  // 10ms frame time
+
+// Resampling context structure
+typedef struct {
+    SRC_STATE *src_state;
+    int input_rate;
+    int output_rate;
+    int channels;
+    float *input_buffer;
+    float *output_buffer;
+    int input_buffer_size;
+    int output_buffer_size;
+    int input_buffer_filled;
+    int output_buffer_filled;
+    int output_buffer_pos;
+} ResampleContext;
+
+// Function declarations
+ResampleContext* init_resample_context(int input_rate, int output_rate, int channels);
+void free_resample_context(ResampleContext *ctx);
+int resample_audio(ResampleContext *ctx, float *input, int input_frames, 
+                   float *output, int *output_frames);
+int calculate_frame_size(int sample_rate);
 
 // WAV file header structure
 typedef struct {
@@ -141,27 +167,122 @@ void update_wav_header_size(FILE *file, int total_samples, int num_channels) {
     fseek(file, current_pos, SEEK_SET);
 }
 
+// Initialize resampling context
+ResampleContext* init_resample_context(int input_rate, int output_rate, int channels) {
+    ResampleContext *ctx = malloc(sizeof(ResampleContext));
+    if (!ctx) return NULL;
+    
+    ctx->input_rate = input_rate;
+    ctx->output_rate = output_rate;
+    ctx->channels = channels;
+    ctx->input_buffer_filled = 0;
+    ctx->output_buffer_filled = 0;
+    ctx->output_buffer_pos = 0;
+    
+    // Calculate buffer sizes (with some extra space for resampling)
+    ctx->input_buffer_size = FRAME_SIZE * 4;  // Extra space for resampling
+    ctx->output_buffer_size = FRAME_SIZE * 4;
+    
+    ctx->input_buffer = malloc(ctx->input_buffer_size * sizeof(float));
+    ctx->output_buffer = malloc(ctx->output_buffer_size * sizeof(float));
+    
+    if (!ctx->input_buffer || !ctx->output_buffer) {
+        free_resample_context(ctx);
+        return NULL;
+    }
+    
+    // Initialize libsamplerate
+    int error;
+    ctx->src_state = src_new(SRC_SINC_BEST_QUALITY, channels, &error);
+    if (!ctx->src_state) {
+        fprintf(stderr, "Error initializing resampler: %s\n", src_strerror(error));
+        free_resample_context(ctx);
+        return NULL;
+    }
+    
+    return ctx;
+}
+
+// Free resampling context
+void free_resample_context(ResampleContext *ctx) {
+    if (!ctx) return;
+    
+    if (ctx->src_state) {
+        src_delete(ctx->src_state);
+    }
+    if (ctx->input_buffer) {
+        free(ctx->input_buffer);
+    }
+    if (ctx->output_buffer) {
+        free(ctx->output_buffer);
+    }
+    free(ctx);
+}
+
+// Resample audio data
+int resample_audio(ResampleContext *ctx, float *input, int input_frames, 
+                   float *output, int *output_frames) {
+    SRC_DATA src_data;
+    int error;
+    
+    src_data.data_in = input;
+    src_data.data_out = output;
+    src_data.input_frames = input_frames;
+    src_data.output_frames = *output_frames;
+    src_data.src_ratio = (double)ctx->output_rate / ctx->input_rate;
+    src_data.end_of_input = 0;
+    
+    error = src_process(ctx->src_state, &src_data);
+    if (error) {
+        fprintf(stderr, "Resampling error: %s\n", src_strerror(error));
+        return 0;
+    }
+    
+    *output_frames = src_data.output_frames_gen;
+    return 1;
+}
+
+// Calculate frame size for 10ms at given sample rate
+int calculate_frame_size(int sample_rate) {
+    return (sample_rate * FRAME_TIME_MS) / 1000;
+}
+
 int main(int argc, char **argv) {
   int i;
   int first = 1;
   float x[FRAME_SIZE];
+  float y[FRAME_SIZE];  // Output frame for resampling
   FILE *f1, *fout;
   DenoiseState *st;
   WavHeader input_header;
   int input_samples_count = 0;
   int output_samples_count = 0;
-  int is_input_wav, is_output_wav;
+  ResampleContext *input_resampler = NULL;
+  ResampleContext *output_resampler = NULL;
+  int input_sample_rate;
+  int output_sample_rate;
+  int input_frame_size;
+  int output_frame_size;
   
   st = rnnoise_create(NULL);
   if (argc!=3) {
     fprintf(stderr, "usage: %s <noisy speech> <output denoised>\n", argv[0]);
-    fprintf(stderr, "Supports both raw PCM (16-bit, mono) and WAV formats\n");
+    fprintf(stderr, "Only WAV format is supported\n");
     return 1;
   }
   
-  // Check file formats
-  is_input_wav = is_wav_file(argv[1]);
-  is_output_wav = is_wav_file(argv[2]);
+  // Check file formats - only WAV is supported
+  if (!is_wav_file(argv[1])) {
+    fprintf(stderr, "Error: Input file must be WAV format (.wav extension)\n");
+    rnnoise_destroy(st);
+    return 1;
+  }
+  
+  if (!is_wav_file(argv[2])) {
+    fprintf(stderr, "Error: Output file must be WAV format (.wav extension)\n");
+    rnnoise_destroy(st);
+    return 1;
+  }
   
   f1 = fopen(argv[1], "rb");
   if (!f1) {
@@ -178,104 +299,162 @@ int main(int argc, char **argv) {
     return 1;
   }
   
-  // Handle WAV input
-  if (is_input_wav) {
-    if (!read_wav_header(f1, &input_header, &input_samples_count)) {
-      fprintf(stderr, "Error reading WAV header from input file\n");
-      fclose(f1);
-      fclose(fout);
-      rnnoise_destroy(st);
-      return 1;
-    }
-    
-    // Check if input is mono (RNNoise works on mono audio)
-    if (input_header.num_channels != 1) {
-      fprintf(stderr, "Warning: Input has %d channels, RNNoise works on mono audio.\n", input_header.num_channels);
-      fprintf(stderr, "Only the first channel will be processed.\n");
-    }
-  } else {
-    printf("Processing raw PCM file (assuming 16-bit, mono, 48kHz)\n");
+  // Read WAV header
+  if (!read_wav_header(f1, &input_header, &input_samples_count)) {
+    fprintf(stderr, "Error reading WAV header from input file\n");
+    fclose(f1);
+    fclose(fout);
+    rnnoise_destroy(st);
+    return 1;
   }
   
-  // Handle WAV output header (write placeholder, update later)
-  if (is_output_wav) {
-    int sample_rate = is_input_wav ? input_header.sample_rate : 48000;
-    if (!write_wav_header(fout, sample_rate, 1, 0)) { // 0 samples for now
-      fprintf(stderr, "Error writing WAV header to output file\n");
+  input_sample_rate = input_header.sample_rate;
+  output_sample_rate = input_sample_rate;  // Output will have same rate as input
+  
+  // Calculate frame sizes for 10ms
+  input_frame_size = calculate_frame_size(input_sample_rate);
+  output_frame_size = calculate_frame_size(output_sample_rate);
+  
+  printf("Input frame size: %d samples (10ms at %d Hz)\n", input_frame_size, input_sample_rate);
+  printf("Output frame size: %d samples (10ms at %d Hz)\n", output_frame_size, output_sample_rate);
+  
+  // Check if input is mono (RNNoise works on mono audio)
+  if (input_header.num_channels != 1) {
+    fprintf(stderr, "Warning: Input has %d channels, RNNoise works on mono audio.\n", input_header.num_channels);
+    fprintf(stderr, "Only the first channel will be processed.\n");
+    fclose(f1);
+    fclose(fout);
+    rnnoise_destroy(st);
+    return 1;
+  }
+  
+  // Initialize resamplers if needed
+  if (input_sample_rate != TARGET_SAMPLE_RATE) {
+    printf("Input sample rate (%d Hz) != target rate (%d Hz), resampling input...\n", 
+           input_sample_rate, TARGET_SAMPLE_RATE);
+    input_resampler = init_resample_context(input_sample_rate, TARGET_SAMPLE_RATE, 1);
+    if (!input_resampler) {
+      fprintf(stderr, "Failed to initialize input resampler\n");
       fclose(f1);
       fclose(fout);
       rnnoise_destroy(st);
       return 1;
     }
+  }
+  
+  if (output_sample_rate != TARGET_SAMPLE_RATE) {
+    printf("Output sample rate (%d Hz) != target rate (%d Hz), resampling output...\n", 
+           output_sample_rate, TARGET_SAMPLE_RATE);
+    output_resampler = init_resample_context(TARGET_SAMPLE_RATE, output_sample_rate, 1);
+    if (!output_resampler) {
+      fprintf(stderr, "Failed to initialize output resampler\n");
+      fclose(f1);
+      fclose(fout);
+      rnnoise_destroy(st);
+      free_resample_context(input_resampler);
+      return 1;
+    }
+  }
+  
+  // Write WAV output header (write placeholder, update later)
+  if (!write_wav_header(fout, output_sample_rate, 1, 0)) { // 0 samples for now
+    fprintf(stderr, "Error writing WAV header to output file\n");
+    fclose(f1);
+    fclose(fout);
+    rnnoise_destroy(st);
+    free_resample_context(input_resampler);
+    free_resample_context(output_resampler);
+    return 1;
   }
   
   printf("Processing audio...\n");
   
+  int frame_idx = 0;
   while (1) {
-    short tmp[FRAME_SIZE];
+    // Use dynamic frame size based on sample rate
+    int current_frame_size = input_frame_size;
+    short *tmp = malloc(input_frame_size * sizeof(short));
     int samples_read;
     
-    if (is_input_wav && input_header.num_channels > 1) {
-      // Read multi-channel data but only process first channel
-#ifdef _WIN32
-      /* Windows/MSVC doesn't support VLA, use dynamic allocation */
-      short *multi_channel_tmp = (short*)malloc(FRAME_SIZE * input_header.num_channels * sizeof(short));
-#else
-      short multi_channel_tmp[FRAME_SIZE * input_header.num_channels];
-#endif
-      samples_read = fread(multi_channel_tmp, sizeof(short), FRAME_SIZE * input_header.num_channels, f1);
-      samples_read /= input_header.num_channels;
-      
-      // Extract first channel
-      for (i = 0; i < samples_read; i++) {
-        tmp[i] = multi_channel_tmp[i * input_header.num_channels];
-      }
-      
-#ifdef _WIN32
-      /* Free dynamically allocated memory on Windows */
-      free(multi_channel_tmp);
-#endif
-    } else {
-      // Read mono data
-      samples_read = fread(tmp, sizeof(short), FRAME_SIZE, f1);
+    // Read mono data
+    samples_read = fread(tmp, sizeof(short), input_frame_size, f1);
+    
+    if (samples_read == 0) {
+      free(tmp);
+      break;
     }
     
-    if (samples_read == 0) break;
-    
-    // If we read less than FRAME_SIZE samples, pad with zeros
-    for (i = samples_read; i < FRAME_SIZE; i++) {
+    // If we read less than expected samples, pad with zeros
+    for (i = samples_read; i < input_frame_size; i++) {
       tmp[i] = 0;
     }
     
-    // Convert to float
-    for (i = 0; i < FRAME_SIZE; i++) {
+    // Convert to float (pad or truncate to FRAME_SIZE for RNNoise)
+    for (i = 0; i < input_frame_size; i++) {
       x[i] = tmp[i];
+    }
+    
+    printf("frame_idx: %d, frame_size: %d\n", frame_idx, input_frame_size);
+    
+    // Resample input to 48kHz if needed
+    if (input_resampler) {
+      float temp_buffer[FRAME_SIZE * 4];
+      memset(temp_buffer, 0, FRAME_SIZE * 4 * sizeof(float));
+      int temp_frames = FRAME_SIZE * 4;
+      if (!resample_audio(input_resampler, x, input_frame_size, temp_buffer, &temp_frames)) {
+        fprintf(stderr, "Input resampling failed\n");
+        free(tmp);
+        break;
+      }
+      // Copy resampled data back to x
+      memcpy(x, temp_buffer, FRAME_SIZE * sizeof(float));
     }
     
     // Process with RNNoise
     rnnoise_process_frame(st, x, x);
+    frame_idx++;
     
-    // Convert back to short
-    for (i = 0; i < FRAME_SIZE; i++) {
-      tmp[i] = (short)x[i];
+    // Resample output back to original rate if needed
+    memset(y, 0, FRAME_SIZE * sizeof(float));
+    if (output_resampler) {
+      float temp_buffer[FRAME_SIZE * 4];
+      memset(temp_buffer, 0, FRAME_SIZE * 4 * sizeof(float));
+      int temp_frames = FRAME_SIZE * 4;
+      if (!resample_audio(output_resampler, x, FRAME_SIZE, temp_buffer, &temp_frames)) {
+        fprintf(stderr, "Output resampling failed\n");
+        free(tmp);
+        break;
+      }
+      // Copy resampled data to y
+      memcpy(y, temp_buffer, output_frame_size * sizeof(float));
+    } else {
+      // No resampling needed, copy x to y
+      memcpy(y, x, output_frame_size * sizeof(float));
     }
     
-    // Write output (skip first frame as in original)
-    if (!first) {
-      fwrite(tmp, sizeof(short), FRAME_SIZE, fout);
-      output_samples_count += FRAME_SIZE;
+    // Convert back to short (use current_frame_size for output)
+    for (i = 0; i < output_frame_size; i++) {
+      if (y[i] > 32767) y[i] = 32767;
+      if (y[i] < -32768) y[i] = -32768;
+      tmp[i] = (short)y[i];
     }
-    first = 0;
+    
+    // Write output
+    fwrite(tmp, sizeof(short), samples_read, fout);
+    output_samples_count += samples_read;
+    
+    free(tmp);
   }
   
   // Update WAV header with correct file size
-  if (is_output_wav) {
-    update_wav_header_size(fout, output_samples_count, 1);
-  }
+  update_wav_header_size(fout, output_samples_count, 1);
   
   printf("Processing complete. Output samples: %d\n", output_samples_count);
   
+  // Cleanup
   rnnoise_destroy(st);
+  free_resample_context(input_resampler);
+  free_resample_context(output_resampler);
   fclose(f1);
   fclose(fout);
   return 0;

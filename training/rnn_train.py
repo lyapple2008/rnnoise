@@ -19,6 +19,8 @@ import h5py
 
 from keras.constraints import Constraint
 from keras import backend as K
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler, Callback
+from keras.optimizers import Adam
 import numpy as np
 
 #import tensorflow as tf
@@ -74,15 +76,37 @@ denoise_output = Dense(22, activation='sigmoid', name='denoise_output', kernel_c
 
 model = Model(inputs=main_input, outputs=[denoise_output, vad_output])
 
+# 定义学习率调度函数
+def lr_schedule(epoch):
+    """
+    学习率调度策略：
+    - 前30个epoch: 0.001
+    - 30-60个epoch: 0.0005  
+    - 60-90个epoch: 0.0001
+    - 90+个epoch: 0.00005
+    """
+    if epoch < 30:
+        return 0.001
+    elif epoch < 60:
+        return 0.0005
+    elif epoch < 90:
+        return 0.0001
+    else:
+        return 0.00005
+
+# 创建优化器
+optimizer = Adam(learning_rate=0.001)
+
 model.compile(loss=[mycost, my_crossentropy],
               metrics=[msse],
-              optimizer='adam', loss_weights=[10, 0.5])
+              optimizer=optimizer, 
+              loss_weights=[10, 0.5])
 
 
 batch_size = 32
 
 print('Loading data...')
-with h5py.File('training.h5', 'r') as hf:
+with h5py.File('training_5000000.h5', 'r') as hf:
     all_data = hf['data'][:]
 print('done.')
 
@@ -108,9 +132,84 @@ all_data = 0
 
 print(len(x_train), 'train sequences. x shape =', x_train.shape, 'y shape = ', y_train.shape)
 
+# 设置模型检查点回调，每个epoch保存模型
+checkpoint = ModelCheckpoint(
+    filepath='weights_5000000_epoch_{epoch:02d}_val_loss_{val_loss:.4f}.hdf5',
+    monitor='val_loss',
+    save_best_only=False,  # 保存每个epoch的模型
+    save_weights_only=False,  # 保存完整模型（包括结构）
+    verbose=1,
+    period=1  # 每个epoch保存一次
+)
+
+# 可选：同时保存最佳模型（基于验证损失）
+best_checkpoint = ModelCheckpoint(
+    filepath='weights_5000000_best.hdf5',
+    monitor='val_loss',
+    save_best_only=True,  # 只保存最佳模型
+    save_weights_only=False,
+    verbose=1
+)
+
+# 学习率调整策略1：基于验证损失的自适应调整
+reduce_lr = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.5,           # 学习率衰减因子
+    patience=5,           # 5个epoch无改善则降低学习率
+    min_lr=1e-6,          # 最小学习率
+    verbose=1,
+    mode='min'            # 监控指标越小越好
+)
+
+# 学习率调整策略2：预定义的学习率调度
+lr_scheduler = LearningRateScheduler(
+    schedule=lr_schedule,
+    verbose=1
+)
+
+# 学习率调整策略3：余弦退火（可选）
+def cosine_annealing(epoch, lr):
+    """余弦退火学习率调度"""
+    import math
+    epochs = 120
+    return 0.001 * (1 + math.cos(math.pi * epoch / epochs)) / 2
+
+# cosine_scheduler = LearningRateScheduler(cosine_annealing, verbose=1)
+
+# 学习率记录回调
+class LearningRateLogger(Callback):
+    def on_epoch_begin(self, epoch, logs=None):
+        lr = float(K.get_value(self.model.optimizer.learning_rate))
+        print(f'\nEpoch {epoch+1}: Learning rate = {lr:.6f}')
+        
+        # 可选：保存学习率到文件
+        with open('learning_rate_log.txt', 'a') as f:
+            f.write(f'Epoch {epoch+1}: {lr:.6f}\n')
+
+lr_logger = LearningRateLogger()
+
 print('Train...')
+# 学习率调整策略配置说明：
+# 1. reduce_lr: 基于验证损失自适应调整，当5个epoch无改善时学习率减半
+# 2. lr_scheduler: 预定义的分段学习率调度
+# 3. lr_logger: 记录每个epoch的学习率变化
+# 4. cosine_scheduler: 余弦退火调度（可选，需要取消注释）
+
+# 选择学习率调整策略（可以组合使用）
+callbacks = [
+    checkpoint, 
+    best_checkpoint,
+    reduce_lr,        # 自适应学习率调整
+    lr_scheduler,     # 预定义学习率调度
+    lr_logger         # 学习率记录
+    # cosine_scheduler  # 可选：余弦退火
+]
+
 model.fit(x_train, [y_train, vad_train],
           batch_size=batch_size,
           epochs=120,
-          validation_split=0.1)
-model.save("weights.hdf5")
+          validation_split=0.1,
+          callbacks=callbacks)
+
+# 保存最终模型
+model.save("weights_5000000_final.hdf5")
