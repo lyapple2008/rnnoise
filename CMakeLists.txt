@@ -9,7 +9,8 @@ if(WIN32 AND MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
-add_subdirectory(src)
-add_subdirectory(examples)
+# add_subdirectory(src)
+# add_subdirectory(examples)
+add_subdirectory(inference)
 
 

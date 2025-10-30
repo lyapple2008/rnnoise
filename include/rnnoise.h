@@ -34,6 +34,9 @@
 extern "C" {
 #endif
 
+// Include kiss_fft.h for kiss_fft_cpx type
+#include "kiss_fft.h"
+
 #ifndef RNNOISE_EXPORT
 # if defined(WIN32)
 #  if defined(RNNOISE_BUILD) && defined(DLL_EXPORT)
@@ -106,6 +109,17 @@ RNNOISE_EXPORT RNNModel *rnnoise_model_from_file(FILE *f);
  * It must be called after all the DenoiseStates referring to it are freed.
  */
 RNNOISE_EXPORT void rnnoise_model_free(RNNModel *model);
+
+/**
+ * Compute frame features for RNNoise
+ *
+ * This function extracts features from an audio frame for use with RNNoise.
+ * It is the core feature extraction function used internally by rnnoise_process_frame.
+ */
+RNNOISE_EXPORT int compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cpx *P,
+                                         float *Ex, float *Ep, float *Exp, float *features, const float *in);
+
+RNNOISE_EXPORT void compute_rnn_c(DenoiseState *st, float *gains, float *vad, const float *input);
 
 #ifdef __cplusplus
 }

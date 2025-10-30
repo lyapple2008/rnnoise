@@ -14,7 +14,7 @@ add_library(rnnoise
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/celt_lpc.c 
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/rnn.c 
     # ${CMAKE_CURRENT_SOURCE_DIR}/../src/rnn_data.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/rnn_data_epoch_100.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/rnn_data_final.c
 )
 
 # Find libsamplerate

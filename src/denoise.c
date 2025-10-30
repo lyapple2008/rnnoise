@@ -307,7 +307,7 @@ static void frame_analysis(DenoiseState *st, kiss_fft_cpx *X, float *Ex, const f
   compute_band_energy(Ex, X);
 }
 
-static int compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cpx *P,
+int compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cpx *P,
                                   float *Ex, float *Ep, float *Exp, float *features, const float *in) {
   int i;
   float E = 0;
@@ -499,6 +499,11 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
 }
 
 
+void compute_rnn_c(DenoiseState *st, float *gains, float *vad, const float *input) {
+  compute_rnn(&(st->rnn), gains, vad, input);
+}
+
+
 #if TRAINING
 
 static float uni_rand() {
@@ -664,6 +669,12 @@ int main(int argc, char **argv) {
     }
     count++;
 #if 1
+    // for (int i = 0; i < FRAME_SIZE; i++) {
+    //   if (xn[i] > 32767) xn[i] = 32767;
+    //   if (xn[i] < -32768) xn[i] = -32768;
+    //   tmp[i] = (short)xn[i];
+    // }
+    // fwrite(tmp, sizeof(short), FRAME_SIZE, fout);
     fwrite(features, sizeof(float), NB_FEATURES, fout); // 模型输入特征42维
     fwrite(g, sizeof(float), NB_BANDS, fout); // 频带增益ground truth
     fwrite(Ln, sizeof(float), NB_BANDS, fout); // 对数bark频带能量
