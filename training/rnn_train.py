@@ -213,3 +213,99 @@ model.fit(x_train, [y_train, vad_train],
 
 # 保存最终模型
 model.save("weights_5000000_final.hdf5")
+
+# 构建并导出带GRU隐状态输入/输出端口的推理模型，便于外部管理隐状态
+def build_export_model(training_model: Model) -> Model:
+    """
+    使用与训练模型相同的权重，构建一个具有显式GRU隐状态输入/输出端口的推理模型。
+    输入：
+      - features: (None, None, 42)
+      - vad_gru_state: (None, 24)
+      - noise_gru_state: (None, 48)
+      - denoise_gru_state: (None, 96)
+    输出：
+      - denoise_output: (None, None, 22)
+      - vad_output: (None, None, 1)
+      - vad_gru_state (updated): (None, 24)
+      - noise_gru_state (updated): (None, 48)
+      - denoise_gru_state (updated): (None, 96)
+    """
+    # 新的推理输入（带状态）
+    features_in = Input(shape=(None, 42), name='features')
+    vad_state_in = Input(shape=(24,), name='vad_gru_state')
+    noise_state_in = Input(shape=(48,), name='noise_gru_state')
+    denoise_state_in = Input(shape=(96,), name='denoise_gru_state')
+
+    # 复制训练模型的层配置并加载权重
+    # 1) input_dense
+    input_dense_src = training_model.get_layer('input_dense')
+    input_dense = Dense(24, activation='tanh', name='input_dense_export',
+                        kernel_constraint=input_dense_src.kernel_constraint,
+                        bias_constraint=input_dense_src.bias_constraint)
+    tmp_export = input_dense(features_in)
+    input_dense.set_weights(input_dense_src.get_weights())
+
+    # 2) vad_gru (return_sequences+return_state)
+    vad_gru_src = training_model.get_layer('vad_gru')
+    vad_gru_exp = GRU(24, activation='tanh', recurrent_activation='sigmoid',
+                      return_sequences=True, return_state=True, name='vad_gru_export',
+                      kernel_regularizer=vad_gru_src.kernel_regularizer,
+                      recurrent_regularizer=vad_gru_src.recurrent_regularizer,
+                      kernel_constraint=vad_gru_src.kernel_constraint,
+                      recurrent_constraint=vad_gru_src.recurrent_constraint,
+                      bias_constraint=vad_gru_src.bias_constraint)
+    vad_seq, vad_state_out = vad_gru_exp(tmp_export, initial_state=vad_state_in)
+    vad_gru_exp.set_weights(vad_gru_src.get_weights())
+
+    # 3) vad_output
+    vad_output_src = training_model.get_layer('vad_output')
+    vad_output_exp_layer = Dense(1, activation='sigmoid', name='vad_output_export',
+                                 kernel_constraint=vad_output_src.kernel_constraint,
+                                 bias_constraint=vad_output_src.bias_constraint)
+    vad_output_exp = vad_output_exp_layer(vad_seq)
+    vad_output_exp_layer.set_weights(vad_output_src.get_weights())
+
+    # 4) noise_gru 输入：concat([tmp_export, vad_seq, features_in])
+    noise_in = concatenate([tmp_export, vad_seq, features_in], name='noise_concat_export')
+    noise_gru_src = training_model.get_layer('noise_gru')
+    noise_gru_exp = GRU(48, activation='relu', recurrent_activation='sigmoid',
+                        return_sequences=True, return_state=True, name='noise_gru_export',
+                        kernel_regularizer=noise_gru_src.kernel_regularizer,
+                        recurrent_regularizer=noise_gru_src.recurrent_regularizer,
+                        kernel_constraint=noise_gru_src.kernel_constraint,
+                        recurrent_constraint=noise_gru_src.recurrent_constraint,
+                        bias_constraint=noise_gru_src.bias_constraint)
+    noise_seq, noise_state_out = noise_gru_exp(noise_in, initial_state=noise_state_in)
+    noise_gru_exp.set_weights(noise_gru_src.get_weights())
+
+    # 5) denoise_gru 输入：concat([vad_seq, noise_seq, features_in])
+    denoise_in = concatenate([vad_seq, noise_seq, features_in], name='denoise_concat_export')
+    denoise_gru_src = training_model.get_layer('denoise_gru')
+    denoise_gru_exp = GRU(96, activation='tanh', recurrent_activation='sigmoid',
+                          return_sequences=True, return_state=True, name='denoise_gru_export',
+                          kernel_regularizer=denoise_gru_src.kernel_regularizer,
+                          recurrent_regularizer=denoise_gru_src.recurrent_regularizer,
+                          kernel_constraint=denoise_gru_src.kernel_constraint,
+                          recurrent_constraint=denoise_gru_src.recurrent_constraint,
+                          bias_constraint=denoise_gru_src.bias_constraint)
+    denoise_seq, denoise_state_out = denoise_gru_exp(denoise_in, initial_state=denoise_state_in)
+    denoise_gru_exp.set_weights(denoise_gru_src.get_weights())
+
+    # 6) denoise_output
+    denoise_output_src = training_model.get_layer('denoise_output')
+    denoise_output_exp_layer = Dense(22, activation='sigmoid', name='denoise_output_export',
+                                     kernel_constraint=denoise_output_src.kernel_constraint,
+                                     bias_constraint=denoise_output_src.bias_constraint)
+    denoise_output_exp = denoise_output_exp_layer(denoise_seq)
+    denoise_output_exp_layer.set_weights(denoise_output_src.get_weights())
+
+    export_model = Model(
+        inputs=[features_in, vad_state_in, noise_state_in, denoise_state_in],
+        outputs=[denoise_output_exp, vad_output_exp, vad_state_out, noise_state_out, denoise_state_out],
+        name='rnnoise_export_with_states'
+    )
+    return export_model
+
+# 训练结束后，构建并保存带状态端口的推理模型
+export_model = build_export_model(model)
+export_model.save("weights_5000000_with_states.hdf5")

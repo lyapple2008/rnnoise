@@ -91,13 +91,64 @@ def convert(hdf5_path: str, onnx_path: str, opset: int = 13) -> None:
     # Load with custom objects registered for deserialization
     model = keras.models.load_model(hdf5_path, custom_objects=CUSTOM_OBJECTS)
 
-    # Use a dynamic input signature (None, None, 42) to preserve time dimension flexibility
-    input_name = model.inputs[0].name.split(':')[0]
-    spec = (tf.TensorSpec([None, None, 42], tf.float32, name=input_name),)
-
-    print(f"Converting to ONNX (opset {opset})...")
-    # Convert directly from the Keras model
-    tf2onnx.convert.from_keras(model, input_signature=spec, output_path=onnx_path, opset=opset)
+    # Check if the model has GRU state inputs/outputs
+    num_inputs = len(model.inputs)
+    num_outputs = len(model.outputs)
+    
+    print(f"Model has {num_inputs} input(s) and {num_outputs} output(s)")
+    
+    # Print input information
+    for i, inp in enumerate(model.inputs):
+        print(f"  Input {i}: {inp.name}, shape: {inp.shape}")
+    
+    # Print output information
+    for i, out in enumerate(model.outputs):
+        print(f"  Output {i}: {out.name}, shape: {out.shape}")
+    
+    # Check if this is a model with GRU states (4 inputs and 5 outputs)
+    if num_inputs == 4 and num_outputs == 5:
+        print("Detected model with GRU state inputs/outputs")
+        # Build input signature for model with efficient state management
+        input_specs = []
+        for inp in model.inputs:
+            inp_name = inp.name.split(':')[0]
+            inp_shape = inp.shape.as_list()
+            
+            # Handle different input shapes
+            if len(inp_shape) == 3:  # features: (None, None, 42)
+                spec = tf.TensorSpec([None, None, inp_shape[2]], tf.float32, name=inp_name)
+            elif len(inp_shape) == 2:  # GRU states: (None, hidden_size)
+                spec = tf.TensorSpec([None, inp_shape[1]], tf.float32, name=inp_name)
+            else:
+                # Fallback: use dynamic shape
+                spec = tf.TensorSpec([None] * len(inp_shape), tf.float32, name=inp_name)
+            
+            input_specs.append(spec)
+        
+        print(f"Converting to ONNX (opset {opset}) with GRU state inputs/outputs...")
+        # Convert with all input signatures
+        tf2onnx.convert.from_keras(model, input_signature=input_specs, output_path=onnx_path, opset=opset)
+        
+    elif num_inputs == 1:
+        print("Detected standard model without GRU state ports")
+        # Use a dynamic input signature (None, None, 42) to preserve time dimension flexibility
+        input_name = model.inputs[0].name.split(':')[0]
+        spec = (tf.TensorSpec([None, None, 42], tf.float32, name=input_name),)
+        
+        print(f"Converting to ONNX (opset {opset})...")
+        # Convert directly from the Keras model
+        tf2onnx.convert.from_keras(model, input_signature=spec, output_path=onnx_path, opset=opset)
+    else:
+        # Generic conversion for models with multiple inputs but unknown structure
+        print(f"Converting to ONNX (opset {opset}) with {num_inputs} inputs...")
+        input_specs = []
+        for inp in model.inputs:
+            inp_name = inp.name.split(':')[0]
+            inp_shape = inp.shape.as_list()
+            # Use dynamic shapes for flexibility
+            spec = tf.TensorSpec([None] * len(inp_shape), tf.float32, name=inp_name)
+            input_specs.append(spec)
+        tf2onnx.convert.from_keras(model, input_signature=input_specs, output_path=onnx_path, opset=opset)
 
     print(f"Saved ONNX model to: {onnx_path}")
     

@@ -69,8 +69,17 @@ typedef struct {
     
     // Input/Output names
     char* input_name;
+    char* input_name_vad_state;
+    char* input_name_noise_state;
+    char* input_name_denoise_state;
     char* output_name_denoise;
     char* output_name_vad;
+    char* output_name_vad_state;
+    char* output_name_noise_state;
+    char* output_name_denoise_state;
+    
+    // Model type detection
+    int has_gru_states;  // 1 if model has GRU state inputs/outputs, 0 otherwise
     
     // Audio processing
     float* input_buffer;
@@ -97,6 +106,12 @@ typedef struct {
     
     // Synthesis memory for overlap-add
     float synthesis_mem[FRAME_SIZE];
+    
+    // GRU states for ONNX inference (external state management)
+    float vad_gru_state[24];      // VAD GRU hidden state
+    float noise_gru_state[48];    // Noise GRU hidden state  
+    float denoise_gru_state[96];  // Denoise GRU hidden state
+    int gru_states_initialized;   // Flag to track initialization
 } RNNoiseContext;
 
 // Function declarations
@@ -107,6 +122,10 @@ int process_audio_frame(RNNoiseContext* ctx, const float* input_frame, float* ou
 void cleanup_context(RNNoiseContext* ctx);
 int extract_features(RNNoiseContext* ctx, const float* frame, float* features);
 void apply_gains(float* frame, const float* gains);
+
+// GRU state management functions
+void initialize_gru_states(RNNoiseContext* ctx);
+int onnx_inference_with_states(RNNoiseContext* ctx, const float* features, float* gains, float* vad);
 
 // Load WAV file
 int load_wav_file(const char* filename, float** audio_data, int* num_samples, int* sample_rate) {
@@ -334,29 +353,99 @@ int initialize_onnx_model(RNNoiseContext* ctx, const char* model_path) {
     printf("  Input nodes: %zu\n", num_input_nodes);
     printf("  Output nodes: %zu\n", num_output_nodes);
     
-    // Get input name
-    status = ctx->api->SessionGetInputName(ctx->session, 0, ctx->allocator, &ctx->input_name);
-    if (status != NULL) {
-        fprintf(stderr, "Error getting input name\n");
-        return -1;
-    }
+    // Detect model type: 4 inputs + 5 outputs = model with GRU states
+    ctx->has_gru_states = (num_input_nodes == 4 && num_output_nodes == 5);
     
-    // Get output names
-    status = ctx->api->SessionGetOutputName(ctx->session, 0, ctx->allocator, &ctx->output_name_denoise);
-    if (status != NULL) {
-        fprintf(stderr, "Error getting denoise output name\n");
-        return -1;
+    if (ctx->has_gru_states) {
+        printf("  Model type: WITH GRU state inputs/outputs\n");
+        
+        // Get all input names
+        status = ctx->api->SessionGetInputName(ctx->session, 0, ctx->allocator, &ctx->input_name);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting features input name\n");
+            return -1;
+        }
+        status = ctx->api->SessionGetInputName(ctx->session, 1, ctx->allocator, &ctx->input_name_vad_state);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting VAD state input name\n");
+            return -1;
+        }
+        status = ctx->api->SessionGetInputName(ctx->session, 2, ctx->allocator, &ctx->input_name_noise_state);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting noise state input name\n");
+            return -1;
+        }
+        status = ctx->api->SessionGetInputName(ctx->session, 3, ctx->allocator, &ctx->input_name_denoise_state);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting denoise state input name\n");
+            return -1;
+        }
+        
+        // Get all output names
+        status = ctx->api->SessionGetOutputName(ctx->session, 0, ctx->allocator, &ctx->output_name_denoise);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting denoise output name\n");
+            return -1;
+        }
+        status = ctx->api->SessionGetOutputName(ctx->session, 1, ctx->allocator, &ctx->output_name_vad);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting VAD output name\n");
+            return -1;
+        }
+        status = ctx->api->SessionGetOutputName(ctx->session, 2, ctx->allocator, &ctx->output_name_vad_state);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting VAD state output name\n");
+            return -1;
+        }
+        status = ctx->api->SessionGetOutputName(ctx->session, 3, ctx->allocator, &ctx->output_name_noise_state);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting noise state output name\n");
+            return -1;
+        }
+        status = ctx->api->SessionGetOutputName(ctx->session, 4, ctx->allocator, &ctx->output_name_denoise_state);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting denoise state output name\n");
+            return -1;
+        }
+        
+        printf("  Inputs:\n");
+        printf("    [0] %s (features)\n", ctx->input_name);
+        printf("    [1] %s (VAD GRU state)\n", ctx->input_name_vad_state);
+        printf("    [2] %s (noise GRU state)\n", ctx->input_name_noise_state);
+        printf("    [3] %s (denoise GRU state)\n", ctx->input_name_denoise_state);
+        printf("  Outputs:\n");
+        printf("    [0] %s (denoise)\n", ctx->output_name_denoise);
+        printf("    [1] %s (VAD)\n", ctx->output_name_vad);
+        printf("    [2] %s (VAD GRU state)\n", ctx->output_name_vad_state);
+        printf("    [3] %s (noise GRU state)\n", ctx->output_name_noise_state);
+        printf("    [4] %s (denoise GRU state)\n", ctx->output_name_denoise_state);
+    } else {
+        printf("  Model type: Standard (without GRU state ports)\n");
+        
+        // Get input name (standard model)
+        status = ctx->api->SessionGetInputName(ctx->session, 0, ctx->allocator, &ctx->input_name);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting input name\n");
+            return -1;
+        }
+        
+        // Get output names (standard model)
+        status = ctx->api->SessionGetOutputName(ctx->session, 0, ctx->allocator, &ctx->output_name_denoise);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting denoise output name\n");
+            return -1;
+        }
+        
+        status = ctx->api->SessionGetOutputName(ctx->session, 1, ctx->allocator, &ctx->output_name_vad);
+        if (status != NULL) {
+            fprintf(stderr, "Error getting VAD output name\n");
+            return -1;
+        }
+        
+        printf("  Input: %s\n", ctx->input_name);
+        printf("  Output denoise: %s\n", ctx->output_name_denoise);
+        printf("  Output VAD: %s\n", ctx->output_name_vad);
     }
-    
-    status = ctx->api->SessionGetOutputName(ctx->session, 1, ctx->allocator, &ctx->output_name_vad);
-    if (status != NULL) {
-        fprintf(stderr, "Error getting VAD output name\n");
-        return -1;
-    }
-    
-    printf("  Input: %s\n", ctx->input_name);
-    printf("  Output denoise: %s\n", ctx->output_name_denoise);
-    printf("  Output VAD: %s\n", ctx->output_name_vad);
     
     // Allocate buffers
     ctx->input_buffer = (float*)malloc(FRAME_SIZE * sizeof(float));
@@ -388,7 +477,185 @@ int initialize_onnx_model(RNNoiseContext* ctx, const char* model_path) {
     memset(ctx->lastg, 0, sizeof(ctx->lastg));
     memset(ctx->synthesis_mem, 0, sizeof(ctx->synthesis_mem));
     
+    // Initialize frame count
+    ctx->frame_count = 0;
+    
+    // Initialize GRU states if model supports it
+    initialize_gru_states(ctx);
+    
     printf("ONNX model loaded successfully: %s\n", model_path);
+    return 0;
+}
+
+// Initialize GRU states
+void initialize_gru_states(RNNoiseContext* ctx) {
+    memset(ctx->vad_gru_state, 0, sizeof(ctx->vad_gru_state));
+    memset(ctx->noise_gru_state, 0, sizeof(ctx->noise_gru_state));
+    memset(ctx->denoise_gru_state, 0, sizeof(ctx->denoise_gru_state));
+    ctx->gru_states_initialized = 0;
+}
+
+// ONNX inference with external state management
+int onnx_inference_with_states(RNNoiseContext* ctx, const float* features, float* gains, float* vad) {
+    // Prepare separate input tensors for features and GRU states
+    float features_data[42];
+    float vad_state_data[24];
+    float noise_state_data[48];
+    float denoise_state_data[96];
+    
+    // Copy features
+    memcpy(features_data, features, 42 * sizeof(float));
+    
+    // Copy GRU states (use saved states for next frame)
+    memcpy(vad_state_data, ctx->vad_gru_state, 24 * sizeof(float));
+    memcpy(noise_state_data, ctx->noise_gru_state, 48 * sizeof(float));
+    memcpy(denoise_state_data, ctx->denoise_gru_state, 96 * sizeof(float));
+    
+    // Create input tensors
+    const int64_t features_shape[] = {1, 1, 42};
+    const int64_t vad_state_shape[] = {1, 24};
+    const int64_t noise_state_shape[] = {1, 48};
+    const int64_t denoise_state_shape[] = {1, 96};
+    
+    OrtMemoryInfo* memory_info;
+    OrtStatus* status = ctx->api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_info);
+    if (status != NULL) {
+        fprintf(stderr, "Error creating memory info\n");
+        return -1;
+    }
+    
+    // Create input tensors
+    OrtValue* features_tensor = NULL;
+    OrtValue* vad_state_tensor = NULL;
+    OrtValue* noise_state_tensor = NULL;
+    OrtValue* denoise_state_tensor = NULL;
+    
+    status = ctx->api->CreateTensorWithDataAsOrtValue(
+        memory_info, features_data, 42 * sizeof(float),
+        features_shape, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &features_tensor);
+    if (status != NULL) {
+        fprintf(stderr, "Error creating features tensor\n");
+        ctx->api->ReleaseMemoryInfo(memory_info);
+        return -1;
+    }
+    
+    status = ctx->api->CreateTensorWithDataAsOrtValue(
+        memory_info, vad_state_data, 24 * sizeof(float),
+        vad_state_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &vad_state_tensor);
+    if (status != NULL) {
+        fprintf(stderr, "Error creating VAD state tensor\n");
+        ctx->api->ReleaseValue(features_tensor);
+        ctx->api->ReleaseMemoryInfo(memory_info);
+        return -1;
+    }
+    
+    status = ctx->api->CreateTensorWithDataAsOrtValue(
+        memory_info, noise_state_data, 48 * sizeof(float),
+        noise_state_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &noise_state_tensor);
+    if (status != NULL) {
+        fprintf(stderr, "Error creating noise state tensor\n");
+        ctx->api->ReleaseValue(features_tensor);
+        ctx->api->ReleaseValue(vad_state_tensor);
+        ctx->api->ReleaseMemoryInfo(memory_info);
+        return -1;
+    }
+    
+    status = ctx->api->CreateTensorWithDataAsOrtValue(
+        memory_info, denoise_state_data, 96 * sizeof(float),
+        denoise_state_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &denoise_state_tensor);
+    if (status != NULL) {
+        fprintf(stderr, "Error creating denoise state tensor\n");
+        ctx->api->ReleaseValue(features_tensor);
+        ctx->api->ReleaseValue(vad_state_tensor);
+        ctx->api->ReleaseValue(noise_state_tensor);
+        ctx->api->ReleaseMemoryInfo(memory_info);
+        return -1;
+    }
+    
+    // Prepare input names and tensors
+    const char* input_names[] = {ctx->input_name, ctx->input_name_vad_state, 
+                                 ctx->input_name_noise_state, ctx->input_name_denoise_state};
+    OrtValue* input_tensors[] = {features_tensor, vad_state_tensor, noise_state_tensor, denoise_state_tensor};
+    
+    // Prepare output names
+    const char* output_names[] = {ctx->output_name_denoise, ctx->output_name_vad, 
+                                  ctx->output_name_vad_state, ctx->output_name_noise_state, 
+                                  ctx->output_name_denoise_state};
+    OrtValue* output_tensors[5] = {NULL, NULL, NULL, NULL, NULL};
+    
+    // Run inference
+    status = ctx->api->Run(ctx->session, NULL, input_names, (const OrtValue* const*)input_tensors, 4,
+                   output_names, 5, output_tensors);
+    if (status != NULL) {
+        fprintf(stderr, "Error running inference\n");
+        ctx->api->ReleaseValue(features_tensor);
+        ctx->api->ReleaseValue(vad_state_tensor);
+        ctx->api->ReleaseValue(noise_state_tensor);
+        ctx->api->ReleaseValue(denoise_state_tensor);
+        ctx->api->ReleaseMemoryInfo(memory_info);
+        return -1;
+    }
+    
+    // Get output data
+    float* denoise_output = NULL;
+    float* vad_output = NULL;
+    float* updated_vad_state = NULL;
+    float* updated_noise_state = NULL;
+    float* updated_denoise_state = NULL;
+    
+    status = ctx->api->GetTensorMutableData(output_tensors[0], (void**)&denoise_output);
+    if (status != NULL) {
+        fprintf(stderr, "Error getting denoise output data\n");
+        goto cleanup;
+    }
+    
+    status = ctx->api->GetTensorMutableData(output_tensors[1], (void**)&vad_output);
+    if (status != NULL) {
+        fprintf(stderr, "Error getting VAD output data\n");
+        goto cleanup;
+    }
+    
+    status = ctx->api->GetTensorMutableData(output_tensors[2], (void**)&updated_vad_state);
+    if (status != NULL) {
+        fprintf(stderr, "Error getting updated VAD state data\n");
+        goto cleanup;
+    }
+    
+    status = ctx->api->GetTensorMutableData(output_tensors[3], (void**)&updated_noise_state);
+    if (status != NULL) {
+        fprintf(stderr, "Error getting updated noise state data\n");
+        goto cleanup;
+    }
+    
+    status = ctx->api->GetTensorMutableData(output_tensors[4], (void**)&updated_denoise_state);
+    if (status != NULL) {
+        fprintf(stderr, "Error getting updated denoise state data\n");
+        goto cleanup;
+    }
+    
+    // Store results
+    memcpy(gains, denoise_output, NB_BANDS * sizeof(float));
+    *vad = vad_output[0];
+    
+    // Update GRU states with the outputs from the model (for next frame)
+    memcpy(ctx->vad_gru_state, updated_vad_state, 24 * sizeof(float));
+    memcpy(ctx->noise_gru_state, updated_noise_state, 48 * sizeof(float));
+    memcpy(ctx->denoise_gru_state, updated_denoise_state, 96 * sizeof(float));
+    ctx->gru_states_initialized = 1;
+    
+cleanup:
+    // Cleanup
+    ctx->api->ReleaseValue(features_tensor);
+    ctx->api->ReleaseValue(vad_state_tensor);
+    ctx->api->ReleaseValue(noise_state_tensor);
+    ctx->api->ReleaseValue(denoise_state_tensor);
+    for (int i = 0; i < 5; i++) {
+        if (output_tensors[i]) {
+            ctx->api->ReleaseValue(output_tensors[i]);
+        }
+    }
+    ctx->api->ReleaseMemoryInfo(memory_info);
+    
     return 0;
 }
 
@@ -551,6 +818,9 @@ int process_audio_frame(RNNoiseContext* ctx, const float* input_frame, float* ou
     float vad_prob_c_version = 0;
     int silence;
     
+    // Increment frame count
+    ctx->frame_count++;
+    
     // Apply biquad high-pass filter (same as in rnnoise_process_frame)
     static const float a_hp[2] = {-1.99599, 0.99600};
     static const float b_hp[2] = {-2, 1};
@@ -560,17 +830,43 @@ int process_audio_frame(RNNoiseContext* ctx, const float* input_frame, float* ou
     silence = compute_frame_features(ctx->denoise_state, ctx->X, ctx->P, ctx->Ex, ctx->Ep, ctx->Exp, ctx->features, x);
     
     if (!silence) {
-        // Run ONNX inference instead of compute_rnn
-        float input_tensor_values[NB_FEATURES];
-        memcpy(input_tensor_values, ctx->features, NB_FEATURES * sizeof(float));
-        
-        // Create input tensor
-        const int64_t input_shape[] = {1, 1, NB_FEATURES};
-        const size_t input_tensor_size = NB_FEATURES * sizeof(float);
-        
-        OrtMemoryInfo* memory_info;
-        OrtStatus* status = ctx->api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_info);
-        if (status != NULL) {
+        // Use appropriate inference method based on model type
+        if (ctx->has_gru_states) {
+            // Use ONNX inference with GRU state management (streaming inference)
+            if (onnx_inference_with_states(ctx, ctx->features, g, &vad_prob) != 0) {
+                fprintf(stderr, "Error in ONNX inference with states\n");
+                return -1;
+            }
+            
+            // Debug output for first few frames
+            if (ctx->frame_count < 5) {
+                printf("Frame %d - ONNX with state management:\n", ctx->frame_count);
+                printf("  VAD GRU state[0-3]: %.6f %.6f %.6f %.6f\n", 
+                       ctx->vad_gru_state[0], ctx->vad_gru_state[1], 
+                       ctx->vad_gru_state[2], ctx->vad_gru_state[3]);
+                printf("  Noise GRU state[0-3]: %.6f %.6f %.6f %.6f\n", 
+                       ctx->noise_gru_state[0], ctx->noise_gru_state[1], 
+                       ctx->noise_gru_state[2], ctx->noise_gru_state[3]);
+                printf("  Denoise GRU state[0-3]: %.6f %.6f %.6f %.6f\n", 
+                       ctx->denoise_gru_state[0], ctx->denoise_gru_state[1], 
+                       ctx->denoise_gru_state[2], ctx->denoise_gru_state[3]);
+                printf("  VAD: %.6f\n", vad_prob);
+                for (i = 0; i < 5; i++) {
+                    printf("  Gain[%d]: %.6f\n", i, g[i]);
+                }
+            }
+        } else {
+            // Use standard ONNX inference (without state management)
+            float input_tensor_values[NB_FEATURES];
+            memcpy(input_tensor_values, ctx->features, NB_FEATURES * sizeof(float));
+            
+            // Create input tensor
+            const int64_t input_shape[] = {1, 1, NB_FEATURES};
+            const size_t input_tensor_size = NB_FEATURES * sizeof(float);
+            
+            OrtMemoryInfo* memory_info;
+            OrtStatus* status = ctx->api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_info);
+            if (status != NULL) {
             fprintf(stderr, "Error creating memory info\n");
             return -1;
         }
@@ -624,24 +920,17 @@ int process_audio_frame(RNNoiseContext* ctx, const float* input_frame, float* ou
             return -1;
         }
         
-        // Store results
-        memcpy(g, denoise_output, NB_BANDS * sizeof(float));
-        vad_prob = vad_output[0];
+            // Store results
+            memcpy(g, denoise_output, NB_BANDS * sizeof(float));
+            vad_prob = vad_output[0];
+            
+            // Cleanup ONNX tensors
+            ctx->api->ReleaseValue(input_tensor);
+            ctx->api->ReleaseValue(output_tensors[0]);
+            ctx->api->ReleaseValue(output_tensors[1]);
+            ctx->api->ReleaseMemoryInfo(memory_info);
+        }
         
-        // 对比验证C代码
-        compute_rnn_c(ctx->denoise_state, g_c_version, &vad_prob_c_version, ctx->features);
-//        memcpy(g, g_c_version, NB_BANDS * sizeof(float));
-//        vad_prob = vad_prob_c_version;
-
-         for (i=0;i<NB_FEATURES;i++) {
-             if (fabs(g[i] - g_c_version[i]) > 1e-5) {
-                 printf("g[%d] = %f, g_c_version[%d] = %f\n", i, g[i], i, g_c_version[i]);
-             }
-         }
-         if (fabs(vad_prob - vad_prob_c_version) > 1e-5) {
-             printf("vad_prob = %f, vad_prob_c_version = %f\n", vad_prob, vad_prob_c_version);
-         }
-
         // Apply pitch filter (same as in rnnoise_process_frame)
         pitch_filter(ctx->X, ctx->P, ctx->Ex, ctx->Ep, ctx->Exp, g);
         
@@ -660,12 +949,6 @@ int process_audio_frame(RNNoiseContext* ctx, const float* input_frame, float* ou
             ctx->X[i].r *= gf[i];
             ctx->X[i].i *= gf[i];
         }
-        
-        // Cleanup ONNX tensors
-        ctx->api->ReleaseValue(input_tensor);
-        ctx->api->ReleaseValue(output_tensors[0]);
-        ctx->api->ReleaseValue(output_tensors[1]);
-        ctx->api->ReleaseMemoryInfo(memory_info);
     }
     
     // Frame synthesis (same as in rnnoise_process_frame)
@@ -693,6 +976,18 @@ void cleanup_context(RNNoiseContext* ctx) {
             ctx->api->AllocatorFree(ctx->allocator, ctx->input_name);
             ctx->input_name = NULL;
         }
+        if (ctx->input_name_vad_state) {
+            ctx->api->AllocatorFree(ctx->allocator, ctx->input_name_vad_state);
+            ctx->input_name_vad_state = NULL;
+        }
+        if (ctx->input_name_noise_state) {
+            ctx->api->AllocatorFree(ctx->allocator, ctx->input_name_noise_state);
+            ctx->input_name_noise_state = NULL;
+        }
+        if (ctx->input_name_denoise_state) {
+            ctx->api->AllocatorFree(ctx->allocator, ctx->input_name_denoise_state);
+            ctx->input_name_denoise_state = NULL;
+        }
         if (ctx->output_name_denoise) {
             ctx->api->AllocatorFree(ctx->allocator, ctx->output_name_denoise);
             ctx->output_name_denoise = NULL;
@@ -700,6 +995,18 @@ void cleanup_context(RNNoiseContext* ctx) {
         if (ctx->output_name_vad) {
             ctx->api->AllocatorFree(ctx->allocator, ctx->output_name_vad);
             ctx->output_name_vad = NULL;
+        }
+        if (ctx->output_name_vad_state) {
+            ctx->api->AllocatorFree(ctx->allocator, ctx->output_name_vad_state);
+            ctx->output_name_vad_state = NULL;
+        }
+        if (ctx->output_name_noise_state) {
+            ctx->api->AllocatorFree(ctx->allocator, ctx->output_name_noise_state);
+            ctx->output_name_noise_state = NULL;
+        }
+        if (ctx->output_name_denoise_state) {
+            ctx->api->AllocatorFree(ctx->allocator, ctx->output_name_denoise_state);
+            ctx->output_name_denoise_state = NULL;
         }
         if (ctx->session) {
             ctx->api->ReleaseSession(ctx->session);
