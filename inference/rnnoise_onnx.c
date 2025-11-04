@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <assert.h>
+#include <time.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -495,6 +496,11 @@ void initialize_gru_states(RNNoiseContext* ctx) {
     ctx->gru_states_initialized = 0;
 }
 
+// Cross-platform timing function using C standard library
+static double get_time_ms(void) {
+    return (double)clock() * 1000.0 / CLOCKS_PER_SEC; // Convert to milliseconds
+}
+
 // ONNX inference with external state management
 int onnx_inference_with_states(RNNoiseContext* ctx, const float* features, float* gains, float* vad) {
     // Prepare separate input tensors for features and GRU states
@@ -830,6 +836,9 @@ int process_audio_frame(RNNoiseContext* ctx, const float* input_frame, float* ou
     silence = compute_frame_features(ctx->denoise_state, ctx->X, ctx->P, ctx->Ex, ctx->Ep, ctx->Exp, ctx->features, x);
     
     if (!silence) {
+        // Start timing for ONNX inference
+        double inference_start_time = get_time_ms();
+        
         // Use appropriate inference method based on model type
         if (ctx->has_gru_states) {
             // Use ONNX inference with GRU state management (streaming inference)
@@ -867,59 +876,59 @@ int process_audio_frame(RNNoiseContext* ctx, const float* input_frame, float* ou
             OrtMemoryInfo* memory_info;
             OrtStatus* status = ctx->api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_info);
             if (status != NULL) {
-            fprintf(stderr, "Error creating memory info\n");
-            return -1;
-        }
-        
-        OrtValue* input_tensor = NULL;
-        status = ctx->api->CreateTensorWithDataAsOrtValue(
-            memory_info, input_tensor_values, input_tensor_size,
-            input_shape, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_tensor);
-        if (status != NULL) {
-            fprintf(stderr, "Error creating input tensor\n");
-            ctx->api->ReleaseMemoryInfo(memory_info);
-            return -1;
-        }
-        
-        // Prepare output tensors
-        const char* input_names[] = {ctx->input_name};
-        const char* output_names[] = {ctx->output_name_denoise, ctx->output_name_vad};
-        OrtValue* output_tensors[2] = {NULL, NULL};
-        
-        // Run inference
-        status = ctx->api->Run(ctx->session, NULL, input_names, (const OrtValue* const*)&input_tensor, 1,
-                       output_names, 2, output_tensors);
-        if (status != NULL) {
-            fprintf(stderr, "Error running inference\n");
-            ctx->api->ReleaseValue(input_tensor);
-            ctx->api->ReleaseMemoryInfo(memory_info);
-            return -1;
-        }
-        
-        // Get output data
-        float* denoise_output = NULL;
-        float* vad_output = NULL;
-        
-        status = ctx->api->GetTensorMutableData(output_tensors[0], (void**)&denoise_output);
-        if (status != NULL) {
-            fprintf(stderr, "Error getting denoise output data\n");
-            ctx->api->ReleaseValue(input_tensor);
-            ctx->api->ReleaseValue(output_tensors[0]);
-            ctx->api->ReleaseValue(output_tensors[1]);
-            ctx->api->ReleaseMemoryInfo(memory_info);
-            return -1;
-        }
-        
-        status = ctx->api->GetTensorMutableData(output_tensors[1], (void**)&vad_output);
-        if (status != NULL) {
-            fprintf(stderr, "Error getting VAD output data\n");
-            ctx->api->ReleaseValue(input_tensor);
-            ctx->api->ReleaseValue(output_tensors[0]);
-            ctx->api->ReleaseValue(output_tensors[1]);
-            ctx->api->ReleaseMemoryInfo(memory_info);
-            return -1;
-        }
-        
+                fprintf(stderr, "Error creating memory info\n");
+                return -1;
+            }
+            
+            OrtValue* input_tensor = NULL;
+            status = ctx->api->CreateTensorWithDataAsOrtValue(
+                memory_info, input_tensor_values, input_tensor_size,
+                input_shape, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_tensor);
+            if (status != NULL) {
+                fprintf(stderr, "Error creating input tensor\n");
+                ctx->api->ReleaseMemoryInfo(memory_info);
+                return -1;
+            }
+            
+            // Prepare output tensors
+            const char* input_names[] = {ctx->input_name};
+            const char* output_names[] = {ctx->output_name_denoise, ctx->output_name_vad};
+            OrtValue* output_tensors[2] = {NULL, NULL};
+            
+            // Run inference
+            status = ctx->api->Run(ctx->session, NULL, input_names, (const OrtValue* const*)&input_tensor, 1,
+                           output_names, 2, output_tensors);
+            if (status != NULL) {
+                fprintf(stderr, "Error running inference\n");
+                ctx->api->ReleaseValue(input_tensor);
+                ctx->api->ReleaseMemoryInfo(memory_info);
+                return -1;
+            }
+            
+            // Get output data
+            float* denoise_output = NULL;
+            float* vad_output = NULL;
+            
+            status = ctx->api->GetTensorMutableData(output_tensors[0], (void**)&denoise_output);
+            if (status != NULL) {
+                fprintf(stderr, "Error getting denoise output data\n");
+                ctx->api->ReleaseValue(input_tensor);
+                ctx->api->ReleaseValue(output_tensors[0]);
+                ctx->api->ReleaseValue(output_tensors[1]);
+                ctx->api->ReleaseMemoryInfo(memory_info);
+                return -1;
+            }
+            
+            status = ctx->api->GetTensorMutableData(output_tensors[1], (void**)&vad_output);
+            if (status != NULL) {
+                fprintf(stderr, "Error getting VAD output data\n");
+                ctx->api->ReleaseValue(input_tensor);
+                ctx->api->ReleaseValue(output_tensors[0]);
+                ctx->api->ReleaseValue(output_tensors[1]);
+                ctx->api->ReleaseMemoryInfo(memory_info);
+                return -1;
+            }
+            
             // Store results
             memcpy(g, denoise_output, NB_BANDS * sizeof(float));
             vad_prob = vad_output[0];
@@ -929,6 +938,28 @@ int process_audio_frame(RNNoiseContext* ctx, const float* input_frame, float* ou
             ctx->api->ReleaseValue(output_tensors[0]);
             ctx->api->ReleaseValue(output_tensors[1]);
             ctx->api->ReleaseMemoryInfo(memory_info);
+        }
+        
+        // End timing and print statistics
+        double inference_end_time = get_time_ms();
+        double inference_time = inference_end_time - inference_start_time;
+        
+        // Start timing for C inference
+        double c_inference_start_time = get_time_ms();
+        
+        {
+            compute_rnn_c(ctx->denoise_state, g_c_version, &vad_prob_c_version, ctx->features);
+        }
+        
+        // End timing for C inference
+        double c_inference_end_time = get_time_ms();
+        double c_inference_time = c_inference_end_time - c_inference_start_time;
+        
+        // Print timing statistics for first few frames
+        if (ctx->frame_count <= 15) {
+            printf("Frame %d - ONNX inference time: %.3f ms, C inference time: %.3f ms (ratio: %.2fx)\n", 
+                   ctx->frame_count, inference_time, c_inference_time, 
+                   c_inference_time > 0 ? inference_time / c_inference_time : 0.0);
         }
         
         // Apply pitch filter (same as in rnnoise_process_frame)
