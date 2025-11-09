@@ -30,6 +30,8 @@ from typing import Any
 
 import keras.backend as K
 from keras.constraints import Constraint
+from keras.layers import Input, Dense, GRU, concatenate
+from keras.models import Model
 
 
 def my_crossentropy(y_true, y_pred):
@@ -83,13 +85,111 @@ CUSTOM_OBJECTS = {
 }
 
 
-def convert(hdf5_path: str, onnx_path: str, opset: int = 13) -> None:
+def rebuild_model_with_states(training_model: Model) -> Model:
+    """
+    自动重建模型，添加GRU隐状态输入/输出端口。
+    如果模型已经有GRU状态端口，直接返回原模型。
+    """
+    # 检查是否已有GRU状态端口
+    if len(training_model.inputs) == 4 and len(training_model.outputs) == 5:
+        print("  Model already has GRU state ports, skipping rebuild")
+        return training_model
+    
+    print("  Rebuilding model with GRU state inputs/outputs...")
+    
+    # 新的推理输入（带状态）
+    features_in = Input(shape=(None, 42), name='features')
+    vad_state_in = Input(shape=(24,), name='vad_gru_state')
+    noise_state_in = Input(shape=(48,), name='noise_gru_state')
+    denoise_state_in = Input(shape=(96,), name='denoise_gru_state')
+
+    # 复制训练模型的层配置并加载权重
+    # 1) input_dense
+    input_dense_src = training_model.get_layer('input_dense')
+    input_dense = Dense(24, activation='tanh', name='input_dense_export',
+                        kernel_constraint=input_dense_src.kernel_constraint,
+                        bias_constraint=input_dense_src.bias_constraint)
+    tmp_export = input_dense(features_in)
+    input_dense.set_weights(input_dense_src.get_weights())
+
+    # 2) vad_gru (return_sequences+return_state)
+    vad_gru_src = training_model.get_layer('vad_gru')
+    vad_gru_exp = GRU(24, activation='tanh', recurrent_activation='sigmoid',
+                      return_sequences=True, return_state=True, name='vad_gru_export',
+                      kernel_regularizer=vad_gru_src.kernel_regularizer,
+                      recurrent_regularizer=vad_gru_src.recurrent_regularizer,
+                      kernel_constraint=vad_gru_src.kernel_constraint,
+                      recurrent_constraint=vad_gru_src.recurrent_constraint,
+                      bias_constraint=vad_gru_src.bias_constraint)
+    vad_seq, vad_state_out = vad_gru_exp(tmp_export, initial_state=vad_state_in)
+    vad_gru_exp.set_weights(vad_gru_src.get_weights())
+
+    # 3) vad_output
+    vad_output_src = training_model.get_layer('vad_output')
+    vad_output_exp_layer = Dense(1, activation='sigmoid', name='vad_output_export',
+                                 kernel_constraint=vad_output_src.kernel_constraint,
+                                 bias_constraint=vad_output_src.bias_constraint)
+    vad_output_exp = vad_output_exp_layer(vad_seq)
+    vad_output_exp_layer.set_weights(vad_output_src.get_weights())
+
+    # 4) noise_gru 输入：concat([tmp_export, vad_seq, features_in])
+    noise_in = concatenate([tmp_export, vad_seq, features_in], name='noise_concat_export')
+    noise_gru_src = training_model.get_layer('noise_gru')
+    noise_gru_exp = GRU(48, activation='relu', recurrent_activation='sigmoid',
+                        return_sequences=True, return_state=True, name='noise_gru_export',
+                        kernel_regularizer=noise_gru_src.kernel_regularizer,
+                        recurrent_regularizer=noise_gru_src.recurrent_regularizer,
+                        kernel_constraint=noise_gru_src.kernel_constraint,
+                        recurrent_constraint=noise_gru_src.recurrent_constraint,
+                        bias_constraint=noise_gru_src.bias_constraint)
+    noise_seq, noise_state_out = noise_gru_exp(noise_in, initial_state=noise_state_in)
+    noise_gru_exp.set_weights(noise_gru_src.get_weights())
+
+    # 5) denoise_gru 输入：concat([vad_seq, noise_seq, features_in])
+    denoise_in = concatenate([vad_seq, noise_seq, features_in], name='denoise_concat_export')
+    denoise_gru_src = training_model.get_layer('denoise_gru')
+    denoise_gru_exp = GRU(96, activation='tanh', recurrent_activation='sigmoid',
+                          return_sequences=True, return_state=True, name='denoise_gru_export',
+                          kernel_regularizer=denoise_gru_src.kernel_regularizer,
+                          recurrent_regularizer=denoise_gru_src.recurrent_regularizer,
+                          kernel_constraint=denoise_gru_src.kernel_constraint,
+                          recurrent_constraint=denoise_gru_src.recurrent_constraint,
+                          bias_constraint=denoise_gru_src.bias_constraint)
+    denoise_seq, denoise_state_out = denoise_gru_exp(denoise_in, initial_state=denoise_state_in)
+    denoise_gru_exp.set_weights(denoise_gru_src.get_weights())
+
+    # 6) denoise_output
+    denoise_output_src = training_model.get_layer('denoise_output')
+    denoise_output_exp_layer = Dense(22, activation='sigmoid', name='denoise_output_export',
+                                     kernel_constraint=denoise_output_src.kernel_constraint,
+                                     bias_constraint=denoise_output_src.bias_constraint)
+    denoise_output_exp = denoise_output_exp_layer(denoise_seq)
+    denoise_output_exp_layer.set_weights(denoise_output_src.get_weights())
+
+    export_model = Model(
+        inputs=[features_in, vad_state_in, noise_state_in, denoise_state_in],
+        outputs=[denoise_output_exp, vad_output_exp, vad_state_out, noise_state_out, denoise_state_out],
+        name='rnnoise_export_with_states'
+    )
+    
+    print("  ✓ Model rebuilt successfully with GRU state ports")
+    return export_model
+
+
+def convert(hdf5_path: str, onnx_path: str, opset: int = 13, auto_rebuild: bool = False) -> None:
     if not os.path.isfile(hdf5_path):
         raise FileNotFoundError(f"HDF5 model not found: {hdf5_path}")
 
     print(f"Loading Keras model from: {hdf5_path}")
     # Load with custom objects registered for deserialization
     model = keras.models.load_model(hdf5_path, custom_objects=CUSTOM_OBJECTS)
+    
+    # Auto-rebuild model with GRU states if needed
+    if auto_rebuild:
+        print("\n=== Auto-Rebuild Mode ===")
+        print("  Checking if model needs GRU state ports...")
+        model = rebuild_model_with_states(model)
+        print("  Model ready for conversion with GRU state ports\n")
 
     # Check if the model has GRU state inputs/outputs
     num_inputs = len(model.inputs)
@@ -158,6 +258,8 @@ def main():
     parser.add_argument('--input', '-i', required=True, help='Path to Keras HDF5 model file')
     parser.add_argument('--output', '-o', required=False, help='Path to output ONNX file')
     parser.add_argument('--opset', type=int, default=13, help='ONNX opset version (default: 13)')
+    parser.add_argument('--auto-rebuild', action='store_true', 
+                        help='Automatically rebuild model with GRU state ports if missing')
     args = parser.parse_args()
 
     input_path = os.path.abspath(args.input)
@@ -169,7 +271,7 @@ def main():
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    convert(input_path, output_path, opset=args.opset)
+    convert(input_path, output_path, opset=args.opset, auto_rebuild=args.auto_rebuild)
 
 if __name__ == '__main__':
     main()
